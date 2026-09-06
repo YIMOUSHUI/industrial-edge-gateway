@@ -1,0 +1,18 @@
+gateway:
+  id: gateway-01
+
+runtime:
+  worker_threads: 4
+
+logging:
+  level: debug
+
+connectors:
+  - name: simulator
+    type: mock
+    enabled: true
+  - name: tcp-server
+    type: tcp
+    enabled: true
+    port: 9000
+
