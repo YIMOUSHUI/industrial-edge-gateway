@@ -6,7 +6,10 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
-
+#include <vector>
+#include <cstring>
+#include <thread>
+#include <chrono>
 #include <nlohmann/json.hpp>
 
 bool sendAll(int fd,const void* data,std::size_t size)
@@ -33,6 +36,42 @@ bool sendAll(int fd,const void* data,std::size_t size)
         sent += static_cast<std::size_t>(n);
     }
     return true;
+}
+
+std::vector<std::uint8_t> buildFrame(const std::string& payload)
+{
+    std::uint32_t payload_length =static_cast<std::uint32_t>(payload.size());
+    std::uint32_t network_length =htonl(payload_length);
+
+    std::vector<std::uint8_t> frame(sizeof(network_length)+ payload.size());
+    std::memcpy(frame.data(),&network_length,sizeof(network_length));
+    
+    std::memcpy(frame.data() + sizeof(network_length),payload.data(),payload.size());
+    return frame;
+}
+
+std::string buildTelemetryJson(std::uint64_t sequence,double temperature)
+{
+    nlohmann::json root;
+
+    root["device_id"] = "sensor-001";
+    root["timestamp_ms"] = 1757250000000ULL;
+    root["sequence"] = sequence;
+
+    root["metrics"] = nlohmann::json::array({
+        {
+            {"name", "temperature"},
+            {"value", temperature},
+            {"unit", "C"}
+        },
+        {
+            {"name", "pressure"},
+            {"value", 2.1},
+            {"unit", "bar"}
+        }
+    });
+
+    return root.dump();
 }
 
 int main()
@@ -63,47 +102,68 @@ int main()
     }
 
     std::cout<< "Connected to gateway"<< std::endl;
+    std::string payload1 =buildTelemetryJson(1, 25.1);
+    std::string payload2 =buildTelemetryJson(2, 25.2);
+    std::string payload3 =buildTelemetryJson(3, 25.3);
 
-    nlohmann::json root;
-    root["device_id"] = "sensor-001";
-    root["timestamp_ms"] = 1757250000000ULL;
-    root["sequence"] = 1;
+    std::vector<std::uint8_t> frame1 =buildFrame(payload1);
+    std::vector<std::uint8_t> frame2 =buildFrame(payload2);
+    std::vector<std::uint8_t> frame3 =buildFrame(payload3);
 
-    root["metrics"] = nlohmann::json::array({
-        {
-            {"name", "temperature"},
-            {"value", 25.6},
-            {"unit", "C"}
-        },
-        {
-            {"name", "pressure"},
-            {"value", 2.1},
-            {"unit", "bar"}
-        }
-    });
+    std::vector<std::uint8_t> all_frames;
+    all_frames.insert(all_frames.end(),frame1.begin(),frame1.end());
+    all_frames.insert(all_frames.end(),frame2.begin(),frame2.end());
+    all_frames.insert(all_frames.end(),frame3.begin(),frame3.end());
 
-    std::string payload = root.dump();
-
-    std::uint32_t payload_length =static_cast<std::uint32_t>(payload.size());
-    std::uint32_t network_length =htonl(payload_length);
-
-    if (!sendAll(sockfd,&network_length,sizeof(network_length)))
+    if (!sendAll(sockfd,all_frames.data(),all_frames.size()))
     {
-        std::cerr<< "Failed to send header"<< std::endl;
+        std::cerr<< "Failed to send sticky frames"<< std::endl;
 
         close(sockfd);
         return 1;
     }
+    std::cout
+        << "Sent 3 sticky frames, total="
+        << all_frames.size()
+        << " bytes"
+        << std::endl;
+    
+    // std::vector<std::uint8_t> frame =buildFrame(payload);
+    // std::cout<< "Frame total size="<< frame.size() << " bytes, payload="<< payload.size()<< " bytes"<< std::endl;
 
-    if (!sendAll(sockfd,payload.data(),payload.size()))
-    {
-        std::cerr<< "Failed to send payload"<< std::endl;
+    // if (!sendAll(sockfd,frame.data(),2))
+    // {
+    //     std::cerr<< "Failed to send part 1"<< std::endl;
 
-        close(sockfd);
-        return 1;
-    }
+    //     close(sockfd);
+    //     return 1;
+    // }
 
-    std::cout<< "Sent telemetry frame, payload="<< payload.size()<< " bytes"<< std::endl;
+    // std::cout<< "Sent part 1: 2 bytes"<< std::endl;
+    // std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // // 第二次：发送接下来的3字节
+    // if (!sendAll(sockfd,frame.data() + 2,3))
+    // {
+    //     std::cerr<< "Failed to send part 2"<< std::endl;
+
+    //     close(sockfd);
+    //     return 1;
+    // }
+
+    // std::cout<< "Sent part 2: 3 bytes"<< std::endl;
+
+    // std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // // 第三次：发送剩余全部字节
+    // if (!sendAll(sockfd,frame.data() + 5,frame.size() - 5))
+    // {
+    //     std::cerr<< "Failed to send part 3"<< std::endl;
+
+    //     close(sockfd);
+    //     return 1;
+    // }
+    // std::cout<< "Sent part 3: "<< frame.size() - 5<< " bytes"<< std::endl;
 
     close(sockfd);
 

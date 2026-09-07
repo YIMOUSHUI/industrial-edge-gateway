@@ -21,7 +21,6 @@ add_executable(gatewayd
 
     src/common/config.cpp
     src/common/logger.cpp
-
 )
 
 add_executable(tcp_device_simulator
