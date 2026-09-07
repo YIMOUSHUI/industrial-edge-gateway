@@ -2,9 +2,16 @@
 
 #include <atomic>
 #include <thread>
-#include <unordered_set>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
 
 #include "connectors/iconnector.h"
+
+struct ClientState
+{
+    std::vector<std::uint8_t> recv_buffer;
+};
 
 class TcpConnector : public IConnector
 {
@@ -21,8 +28,9 @@ public:
 private:
     void ioLoop();//长期运行的网络事件循环  负责：事件分发
 
-    void handleClientReadable(int client_fd);
+    void handleClientReadable(int client_fd);//负责recv字节
     void removeClient(int client_fd);
+    bool processBuffer(int client_fd);//负责从recv_buffer里拆完整Frame
 private:
     int port_;
 
@@ -32,7 +40,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread io_thread_;
 
-    std::unordered_set<int> client_fds_;
+    std::unordered_map<int, ClientState> clients_;
 
     MessageCallback message_callback_;
 };

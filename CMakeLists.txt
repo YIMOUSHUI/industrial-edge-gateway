@@ -7,14 +7,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(yaml-cpp REQUIRED)
 find_package(spdlog REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 add_executable(gatewayd
     src/main.cpp
+
+    src/core/gateway_context.cpp
+
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp
-    src/core/gateway_context.cpp
+
+    src/converters/telemetry_converter.cpp
+
     src/common/config.cpp
     src/common/logger.cpp
+
 )
 
 target_include_directories(gatewayd
@@ -26,4 +33,5 @@ target_link_libraries(gatewayd
     PRIVATE
     yaml-cpp
     spdlog::spdlog
+    nlohmann_json::nlohmann_json
 )

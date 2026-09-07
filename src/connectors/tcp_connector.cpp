@@ -1,5 +1,5 @@
 #include "connectors/tcp_connector.h"
-
+#include "converters/telemetry_converter.h"
 #include "common/logger.h"
 
 #include <arpa/inet.h>
@@ -93,12 +93,12 @@ void TcpConnector::stop()
         io_thread_.join();
     }
 
-    for (int client_fd : client_fds_)
+    for (const auto& [client_fd, state] : clients_)
     {
         close(client_fd);
     }
 
-    client_fds_.clear();
+    clients_.clear();
     
     if(listen_fd_ >= 0)  //只有socket已经成功创建才能 close。
     {
@@ -163,7 +163,7 @@ void TcpConnector::ioLoop()
                     continue;
                 }
 
-                client_fds_.insert(client_fd);
+                clients_.emplace(client_fd,ClientState{});
                 Logger::info("TCP client connected, fd: "+ std::to_string(client_fd));
 
             }
@@ -175,7 +175,7 @@ void TcpConnector::ioLoop()
                     continue;
                 }
 
-                if(events[i].events & (EPOLLIN | EPOLLRDHUP))
+                if(events[i].events & (EPOLLIN | EPOLLRDHUP))//有数据可读 以及对端关闭相关事件
                 {
                     handleClientReadable(fd);
                 }
@@ -186,7 +186,7 @@ void TcpConnector::ioLoop()
 
 void TcpConnector::handleClientReadable(int client_fd)
 {
-    char buffer[4096];
+    std::uint8_t buffer[4096];
     
     while(true)
     {
@@ -194,6 +194,19 @@ void TcpConnector::handleClientReadable(int client_fd)
         if(n > 0)
         {
             Logger::debug("TCP received " + std::to_string(n) + " bytes from fd= " + std::to_string(client_fd));
+            auto it = clients_.find(client_fd);
+            if (it == clients_.end()) //fd 已经不在客户端管理表里，就不处理
+            {
+                return;
+            }
+            auto& recv_buffer =it->second.recv_buffer;
+            recv_buffer.insert(recv_buffer.end(),buffer,buffer + n);
+
+            if (!processBuffer(client_fd))
+            {
+                return;
+            }
+
             continue;
         }
         if(n == 0)//对端关闭
@@ -214,12 +227,72 @@ void TcpConnector::handleClientReadable(int client_fd)
     }
 }
 
+bool TcpConnector::processBuffer(int client_fd)
+{
+    auto it = clients_.find(client_fd);
+
+    if(it == clients_.end())
+    {
+        return false;
+    }
+
+    auto& buffer = it->second.recv_buffer;
+    constexpr std::size_t HEADER_SIZE = sizeof(std::uint32_t);
+
+    while(true) //还能拆出完整Frame，就一直拆
+    {
+        if (buffer.size() < HEADER_SIZE)
+        {
+            return true;
+        }
+        std::uint32_t network_length = 0;
+        //buffer.data() 指向容器内部第一个元素的指针
+        std::memcpy(&network_length,buffer.data(),HEADER_SIZE);
+
+        std::uint32_t payload_length =ntohl(network_length);
+
+        constexpr std::uint32_t MAX_PAYLOAD_SIZE =1024 * 1024;
+        if (payload_length > MAX_PAYLOAD_SIZE)
+        {
+            Logger::error("TCP frame too large, fd= " + std::to_string(client_fd));   
+            removeClient(client_fd);
+
+            return false;
+        }
+        
+        //判断完整帧
+        std::size_t frame_size =HEADER_SIZE + payload_length;
+        if (buffer.size() < frame_size)
+        {
+            return true;
+        }   
+
+        std::vector<std::uint8_t> payload(buffer.begin() + HEADER_SIZE,buffer.begin() + frame_size);
+        Logger::info("TCP complete frame received, fd= " + std::to_string(client_fd) + ", payload= " + std::to_string(payload.size()) + " bytes");
+
+        TelemetryMessage message;
+        if (TelemetryConverter::fromJson(payload,message))
+        {
+            message.protocol = "tcp";
+            if (message_callback_)
+            {
+                message_callback_(message);
+            }
+        }
+
+
+        buffer.erase(buffer.begin(),buffer.begin() + frame_size);
+    }
+
+
+}
+
 void TcpConnector::removeClient(int client_fd)
 {
     epoll_ctl(epoll_fd_,EPOLL_CTL_DEL,client_fd,nullptr);
 
     close(client_fd);
-    client_fds_.erase(client_fd);
+    clients_.erase(client_fd);
 }
 
 std::string TcpConnector::name() const  //这个成员函数承诺不修改当前 TcpConnector 对象的普通成员状态。
