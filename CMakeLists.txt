@@ -24,6 +24,10 @@ add_executable(gatewayd
 
 )
 
+add_executable(tcp_device_simulator
+    tools/tcp_device_simulator.cpp
+)
+
 target_include_directories(gatewayd
     PRIVATE
     ${PROJECT_SOURCE_DIR}/src
@@ -33,5 +37,10 @@ target_link_libraries(gatewayd
     PRIVATE
     yaml-cpp
     spdlog::spdlog
+    nlohmann_json::nlohmann_json
+)
+
+target_link_libraries(tcp_device_simulator
+    PRIVATE
     nlohmann_json::nlohmann_json
 )
