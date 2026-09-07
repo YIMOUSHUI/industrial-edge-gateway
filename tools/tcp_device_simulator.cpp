@@ -50,11 +50,11 @@ std::vector<std::uint8_t> buildFrame(const std::string& payload)
     return frame;
 }
 
-std::string buildTelemetryJson(std::uint64_t sequence,double temperature)
+std::string buildTelemetryJson(const std::string& device_id, std::uint64_t sequence, double temperature)
 {
     nlohmann::json root;
 
-    root["device_id"] = "sensor-001";
+    root["device_id"] = device_id;
     root["timestamp_ms"] = 1757250000000ULL;
     root["sequence"] = sequence;
 
@@ -74,8 +74,14 @@ std::string buildTelemetryJson(std::uint64_t sequence,double temperature)
     return root.dump();
 }
 
-int main()
+int main(int argc, char* argv[])
 {
+    std::string device_id = "sensor-001";
+    if (argc >= 2)
+    {
+        device_id = argv[1];
+    }
+
     int sockfd =socket(AF_INET, SOCK_STREAM, 0);
 
     if (sockfd < 0)
@@ -102,32 +108,40 @@ int main()
     }
 
     std::cout<< "Connected to gateway"<< std::endl;
-    std::string payload1 =buildTelemetryJson(1, 25.1);
-    std::string payload2 =buildTelemetryJson(2, 25.2);
-    std::string payload3 =buildTelemetryJson(3, 25.3);
+    std::string payload1 =buildTelemetryJson(device_id, 1, 25.1);
+    //std::string payload2 =buildTelemetryJson(device_id, 2, 25.2);
+    //std::string payload3 =buildTelemetryJson(device_id, 3, 25.3);
 
     std::vector<std::uint8_t> frame1 =buildFrame(payload1);
-    std::vector<std::uint8_t> frame2 =buildFrame(payload2);
-    std::vector<std::uint8_t> frame3 =buildFrame(payload3);
-
-    std::vector<std::uint8_t> all_frames;
-    all_frames.insert(all_frames.end(),frame1.begin(),frame1.end());
-    all_frames.insert(all_frames.end(),frame2.begin(),frame2.end());
-    all_frames.insert(all_frames.end(),frame3.begin(),frame3.end());
-
-    if (!sendAll(sockfd,all_frames.data(),all_frames.size()))
+    //std::vector<std::uint8_t> frame2 =buildFrame(payload2);
+    //std::vector<std::uint8_t> frame3 =buildFrame(payload3);
+    if (!sendAll(sockfd,frame1.data(),frame1.size()))
     {
-        std::cerr<< "Failed to send sticky frames"<< std::endl;
+        std::cerr<< "Failed to send frame" << std::endl;
 
         close(sockfd);
         return 1;
     }
-    std::cout
-        << "Sent 3 sticky frames, total="
-        << all_frames.size()
-        << " bytes"
-        << std::endl;
-    
+    //std::vector<std::uint8_t> all_frames;
+    //all_frames.insert(all_frames.end(),frame1.begin(),frame1.end());
+    //all_frames.insert(all_frames.end(),frame2.begin(),frame2.end());
+    //all_frames.insert(all_frames.end(),frame3.begin(),frame3.end());
+
+    // if (!sendAll(sockfd,all_frames.data(),all_frames.size()))
+    // {
+    //     std::cerr<< "Failed to send sticky frames"<< std::endl;
+
+    //     close(sockfd);
+    //     return 1;
+    // }
+    // std::cout
+    //     << "Sent 3 sticky frames, total="
+    //     << all_frames.size()
+    //     << " bytes"
+    //     << std::endl;
+
+    std::cout<< device_id<< " finished sending, keep alive for 10 seconds"<< std::endl;
+    sleep(10);
     // std::vector<std::uint8_t> frame =buildFrame(payload);
     // std::cout<< "Frame total size="<< frame.size() << " bytes, payload="<< payload.size()<< " bytes"<< std::endl;
 
