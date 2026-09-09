@@ -279,12 +279,8 @@ bool TcpConnector::processBuffer(int client_fd)
                 message_callback_(message);
             }
         }
-
-
         buffer.erase(buffer.begin(),buffer.begin() + frame_size);
     }
-
-
 }
 
 void TcpConnector::removeClient(int client_fd)

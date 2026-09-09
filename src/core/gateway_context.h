@@ -1,7 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <thread>
 
+#include "core/telemetry_queue.h"
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
@@ -15,8 +17,14 @@ public:
 private:
     void handleMessage(const TelemetryMessage& message);//GatewayContext 收到设备数据以后统一进入的入口
     
+    void workerLoop();
+
     Config config_;
 
     std::vector<std::unique_ptr<IConnector>> connectors_;
+
+    TelemetryQueue telemetry_queue_{1000};
+
+    std::thread worker_thread_;
 };
 

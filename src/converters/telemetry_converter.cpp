@@ -35,3 +35,25 @@ bool TelemetryConverter::fromJson(const std::vector<std::uint8_t>& payload,Telem
     }
     return true;
 }
+
+std::string TelemetryConverter::toJson(const TelemetryMessage& message)
+{
+    nlohmann::json root;
+
+    root["device_id"] = message.device_id;
+    root["protocol"] = message.protocol;
+    root["timestamp_ms"] = message.timestamp_ms;
+    root["sequence"] = message.sequence;
+    root["metrics"] = nlohmann::json::array();
+    
+    for (const MetricValue& metric: message.metrics)
+    {
+        root["metrics"].push_back({
+            {"name", metric.name},
+            {"value", metric.value},
+            {"unit", metric.unit}
+        });
+    }
+
+    return root.dump();
+}

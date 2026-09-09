@@ -16,3 +16,9 @@ connectors:
     enabled: true
     port: 9000
 
+mqtt:
+  enabled: true
+  server_uri: tcp://127.0.0.1:1883
+  client_id: gateway-01
+  topic: gateway/gateway-01/telemetry
+  qos: 1
