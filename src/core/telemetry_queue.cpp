@@ -29,7 +29,7 @@ bool TelemetryQueue::push(const TelemetryMessage& message)
     return true;
 }
 
-bool TelemetryQueue::waitAndPop(TelemetryMessage& message)
+bool TelemetryQueue::waitAndPop(TelemetryMessage& message)//【Worker线程】 等待和处理工作队列
 {
     std::unique_lock<std::mutex> lock(mutex_);
 

@@ -4,6 +4,8 @@
 
 #include <utility>
 
+//MQTT Client主动连接 MQTT Broker 的程序或对象
+
 MqttPublisher::MqttPublisher(const std::string& server_uri,const std::string& client_id,const std::string& topic,int qos)
     : server_uri_(server_uri),
       client_id_(client_id),

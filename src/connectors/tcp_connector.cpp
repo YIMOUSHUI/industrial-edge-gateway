@@ -80,7 +80,7 @@ bool TcpConnector::start()
     running_ = true;
     Logger::info("TcpConnector listening on port: " + std::to_string(port_));
     
-    io_thread_ = std::thread(&TcpConnector::ioLoop,this);//创建线程
+    io_thread_ = std::thread(&TcpConnector::ioLoop,this);//创建线程 执行当前 TcpConnector 对象的 ioLoop()
     return true;
 }
 
@@ -271,7 +271,7 @@ bool TcpConnector::processBuffer(int client_fd)
         Logger::info("TCP complete frame received, fd= " + std::to_string(client_fd) + ", payload= " + std::to_string(payload.size()) + " bytes");
 
         TelemetryMessage message;
-        if (TelemetryConverter::fromJson(payload,message))
+        if (TelemetryConverter::fromJson(payload,message)) //把：JSON字节转换成：TelemetryMessage
         {
             message.protocol = "tcp";
             if (message_callback_)

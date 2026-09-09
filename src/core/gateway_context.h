@@ -7,6 +7,7 @@
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
+#include "mqtt/mqtt_publisher.h"
 
 class GatewayContext
 {
@@ -26,5 +27,7 @@ private:
     TelemetryQueue telemetry_queue_{1000};
 
     std::thread worker_thread_;
+
+    std::unique_ptr<MqttPublisher> mqtt_publisher_;//unique_ptr允许延迟创建对象，初始为 nullptr
 };
 

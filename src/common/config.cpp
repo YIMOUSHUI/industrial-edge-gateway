@@ -10,7 +10,7 @@ bool Config::load(const std::string& path)
     {   
         YAML::Node root = YAML::LoadFile(path);
 
-        data_.gateway_id = root["gateway"]["id"].as<std::string>();
+        data_.gateway_id = root["gateway"]["id"].as<std::string>();//.as<T>() 转换为相应类型
         data_.worker_threads =root["runtime"]["worker_threads"].as<int>();
         data_.log_level =root["logging"]["level"].as<std::string>();
         
@@ -31,6 +31,33 @@ bool Config::load(const std::string& path)
             data_.connectors.push_back(connector);
         }
 
+        if (root["mqtt"])
+        {
+            const YAML::Node mqtt_node = root["mqtt"];
+
+            if (mqtt_node["enabled"])
+            {
+                data_.mqtt.enabled = mqtt_node["enabled"].as<bool>();
+            }
+            if (mqtt_node["server_uri"])
+            {
+                data_.mqtt.server_uri = mqtt_node["server_uri"].as<std::string>();
+            }
+            if (mqtt_node["client_id"])
+            {
+                data_.mqtt.client_id = mqtt_node["client_id"].as<std::string>();
+            }
+            if (mqtt_node["topic"])
+            {
+                data_.mqtt.topic = mqtt_node["topic"].as<std::string>();
+            }
+            if (mqtt_node["qos"])
+            {
+                data_.mqtt.qos = mqtt_node["qos"].as<int>();
+            }
+        }
+
+
     }
     catch(const YAML::Exception& error)
     {
@@ -47,5 +74,5 @@ bool Config::load(const std::string& path)
 
 const GatewayConfig& Config::data() const
 {
-    return data_;
+    return data_; //返回 data_ 的引用
 }
