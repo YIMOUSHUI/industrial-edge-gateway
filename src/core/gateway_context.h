@@ -3,8 +3,6 @@
 #include <memory>
 #include <thread>
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
 
 #include "core/telemetry_queue.h"
 #include "connectors/iconnector.h"
@@ -23,18 +21,6 @@ private:
     void handleMessage(const TelemetryMessage& message);//GatewayContext 收到设备数据以后统一进入的入口
     
     void workerLoop();
-
-    /**
-     * @brief 等待下一次 MQTT 重连时机，并允许 Gateway 停止操作中断等待。
-     *
-     * 正常情况下最多等待 5 秒，然后允许 Worker 再次尝试连接 Broker。
-     * 如果等待期间 GatewayContext::stop() 发出停止请求，
-     * 本函数会立即结束等待并返回 false。
-     *
-     * @return true  等待时间正常结束，可以继续尝试 MQTT 重连。
-     * @return false 收到 Gateway 停止请求，不应继续执行 MQTT 重连。
-     */
-    bool waitForMqttRetry();
 
     Config config_;
 
@@ -73,21 +59,5 @@ private:
      */
     std::atomic<bool> stop_requested_{false};
 
-    /**
-     * @brief MQTT 重连等待使用的互斥锁。
-     *
-     * 主要与 mqtt_retry_condition_ 配合使用，
-     * 不用于保护 MQTT Client 本身。
-     */
-    std::mutex mqtt_retry_mutex_;
-
-    /**
-     * @brief MQTT 重连等待条件变量。
-     *
-     * Worker 可以在这里等待 5 秒。
-     * Gateway 停止时通过 notify_all() 主动唤醒 Worker，
-     * 避免 Worker 必须等 sleep_for(5s) 完整结束。
-     */
-    std::condition_variable mqtt_retry_condition_;
 };
 

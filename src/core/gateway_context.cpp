@@ -153,26 +153,18 @@ void GatewayContext::stop()
     }
 
     /*
-    * 第二步：通知 Worker，Gateway 正在退出。
+    * 通知 Worker：
+    * Gateway 已经进入停止流程。
     *
-    * Worker 在 MQTT 重连过程中会检查该标志。
+    * Worker 后续不会再主动进行 MQTT 网络重连，
+    * 剩余 Queue 消息将优先持久化后退出。
     */
     stop_requested_.store(true);
 
     /*
-     * 第三步：主动唤醒正在等待下一次 MQTT 重连的 Worker。
-     *
-     * 如果 Worker 正在 wait_for(5 秒)，notify_all()
-     * 会让它立即醒来，而不需要等满 5 秒。
-     */
-    mqtt_retry_condition_.notify_all();
-
-    /*
-     * 第四步：停止遥测队列。
-     *
-     * 该操作会唤醒可能正在
-     * TelemetryQueue::waitAndPop() 中等待消息的 Worker。
-     */
+    * 停止 Queue，并唤醒当前可能正在
+    * waitAndPopFor() 中等待消息的 Worker。
+    */
     telemetry_queue_.stop();
 
     /*
@@ -218,103 +210,155 @@ void GatewayContext::handleMessage(const TelemetryMessage& message)
 }
 
 /**
- * @brief 等待 MQTT 下一次重连，并支持 Gateway 停止操作中断等待。
- *
- * Worker 在 MQTT 连接失败后调用本函数。
- *
- * 与 std::this_thread::sleep_for(5s) 不同：
- * wait_for() 最多等待 5 秒，但 GatewayContext::stop()
- * 可以通过 mqtt_retry_condition_.notify_all()
- * 将 Worker 提前唤醒。
- *
- * @return true  等待正常超时，可以继续尝试 MQTT 重连。
- * @return false Gateway 已请求停止，应结束 MQTT 重连流程。
- */
-bool GatewayContext::waitForMqttRetry()
-{
-    /*
-     * condition_variable::wait_for() 需要 unique_lock。
-     *
-     * Worker 进入等待状态时，wait_for() 会暂时释放 mutex；
-     * Worker 被唤醒后，再重新获得 mutex 并检查停止条件。
-    */
-    std::unique_lock<std::mutex> lock(mqtt_retry_mutex_);//unique_lock 允许中途 unlock / lock。
-    /*
-     * wait_for() 有两种结束方式：
-     *
-     * 1. 正常等待满 5 秒：
-     *    stop_requested_ 仍然是 false。
-     *
-     * 2. stop() 设置 stop_requested_=true，
-     *    并调用 notify_all()：
-     *    Worker 被提前唤醒。
-     *
-     * predicate 返回 true 表示：
-     * “停止条件已经满足”。
-    */
-    const bool stopped =
-        mqtt_retry_condition_.wait_for(//最长等待时间。要求搭配：互斥锁
-            lock,
-            std::chrono::seconds(5),
-            [this]()
-            {
-                return stop_requested_.load(); //最多等 5 秒；但是如果 stop_requested_ == true，可以提前结束。
-            }
-        );
-    
-    /*
-     * stopped == true：
-     *   Gateway 请求停止，所以返回 false。
-     *
-     * stopped == false：
-     *   只是正常等满了 5 秒，可以继续重连。
-     */
-    return !stopped;
-}
-
-/**
  * @brief Gateway 遥测业务 Worker 主循环。
  *
- * Worker 是 TelemetryQueue 的消费者，负责：
- * 1. 获取 TelemetryMessage；
- * 2. 将消息转换为 JSON；
- * 3. 检查 MQTT 连接状态；
- * 4. Broker 不可用时进行重连；
- * 5. Broker 恢复后发布当前消息。
+ * Worker 负责：
+ * 1. 从 TelemetryQueue 获取新遥测消息；
+ * 2. MQTT 在线时直接发布消息；
+ * 3. MQTT 离线或发布失败时，将消息持久化到 SQLite；
+ * 4. 即使 Queue 暂时没有新消息，也周期性醒来检查 MQTT 状态；
+ * 5. MQTT 断开期间最多每 5 秒尝试一次重新连接。
  *
- * MQTT 网络操作全部发生在 Worker 线程中，
- * 不会直接阻塞 TcpConnector 的 epoll I/O 线程。
+ * 当前阶段只完成 Store-and-Forward 中的 Store：
+ * 离线数据能够写入 SQLite。
+ *
+ * SQLite 历史数据的自动补发将在下一阶段加入。
  */
 void GatewayContext::workerLoop()//工作者线程 运行函数
 {
     TelemetryMessage message;
 
     /*
+     * 下一次允许尝试 MQTT 重连的时间点。
+     *
+     * 该变量只由 Worker 线程访问，因此不需要 mutex 或 atomic。
+     *
+     * 初始值设为 now()：
+     * 如果 Gateway 启动时 MQTT 连接失败，
+     * Worker 启动后可以立即再检查一次连接状态。
+     */
+    auto next_mqtt_reconnect_time = std::chrono::steady_clock::now();
+    /*
      * waitAndPop()：
      * - Queue 有数据时，取出一条 TelemetryMessage；
      * - Queue 为空时，Worker 在 condition_variable 上睡眠；
      * - Queue stop 且没有剩余数据时返回 false，结束循环。
      */
-    while (telemetry_queue_.waitAndPop(message))
+    while (true)
     {
-        Logger::info("Worker received message from "+ message.device_id+ ", sequence="+ std::to_string(message.sequence));
+        /*
+         * 最多等待 1 秒获取新的 TelemetryMessage。
+         *
+         * 与旧 waitAndPop() 不同：
+         * 即使没有新设备数据，Worker 最多 1 秒也会醒一次，
+         * 从而有机会检查 MQTT 是否需要重连。
+         */
+        const QueuePopResult pop_result =telemetry_queue_.waitAndPopFor(message,std::chrono::milliseconds(1000));
+         
+        /*
+         * Queue 已 stop 且没有剩余消息。
+         *
+         * Worker 的所有输入已经处理完成，
+         * 可以结束线程。
+         */
+        if (pop_result == QueuePopResult::Stopped)
+        {
+            break;
+        }
 
         /*
-         * mqtt_publisher_ 为空表示 MQTT 功能没有启用。
+         * MQTT 功能没有启用时：
          *
-         * 例如 gateway.yaml：
+         * 当前项目不把“主动关闭 MQTT”视为网络故障，
+         * 因此不会把所有消息写入离线数据库。
          *
-         * mqtt:
-         *   enabled: false
+         * Message：
+         *   跳过 MQTT 发布。
          *
-         * 此时不执行任何 MQTT 操作。
+         * Timeout：
+         *   没有消息，也没有 MQTT 维护工作。
          */
         if (!mqtt_publisher_)
         {
-            Logger::debug("MQTT publisher is disabled, skip telemetry publish");
-
+            if (pop_result == QueuePopResult::Message)
+            {
+                Logger::debug(
+                    "MQTT publisher is disabled, skip telemetry publish"
+                );
+            }
             continue;
         }
+
+        /*
+         * Worker 每一轮都可以检查 MQTT 状态。
+         *
+         * 但即使 Worker 每 1 秒甚至更快运行一次，
+         * 也不意味着每次都执行 connect()。
+         *
+         * 只有：
+         * 1. MQTT 当前未连接；
+         * 2. Gateway 没有正在退出；
+         * 3. 已经到达下一次允许重连的时间；
+         *
+         * 才真正尝试连接 Broker。
+         */
+        if (!mqtt_publisher_->isConnected()&& !stop_requested_.load())
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next_mqtt_reconnect_time)
+            {
+                Logger::warn(
+                    "MQTT disconnected; attempting to reconnect"
+                );
+
+                if (mqtt_publisher_->connect())
+                {
+                    Logger::info(
+                        "MQTT connection restored"
+                    );
+                }
+                else
+                {
+                     /*
+                     * 本次重连失败。
+                     *
+                     * 不让 Worker sleep 5 秒，
+                     * 只是记录“下一次 5 秒以后再允许 connect”。
+                     *
+                     * 这 5 秒期间 Worker仍然能够继续消费 Queue，
+                     * 并把离线消息写入 SQLite。
+                     */
+                    next_mqtt_reconnect_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    Logger::warn(
+                        "MQTT reconnect failed; "
+                        "next attempt in 5 seconds"
+                    );
+                }
+
+
+            }
+
+        }
+
+        /*
+         * Timeout 只表示本轮没有新的设备消息。
+         *
+         * MQTT 状态检查已经在上面完成，
+         * 因此本轮可以直接结束，
+         * 回到 while 顶部继续等待。
+        */
+        if (pop_result == QueuePopResult::Timeout)
+        {
+            continue;
+        }
+
+        /*
+         * 能运行到这里，说明本轮确实取到了一条新消息。
+         */
+        Logger::info(
+            "Worker received message from " + message.device_id + ", sequence=" + std::to_string(message.sequence)
+        );
+
         /*
          * 将内部统一数据模型转换成 JSON 字符串。
          *
@@ -332,65 +376,30 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
         const std::string payload = TelemetryConverter::toJson(message);
         
         /*
-         * 当前消息只有在成功发布后才离开这个重试循环。
+         * Gateway 已经进入停止流程时，
+         * 不再尝试新的网络发送。
          *
-         * 这样 Broker 短时间离线时，
-         * 当前已经从 TelemetryQueue 取出的消息不会立即丢失。
+         * 当前 Queue 中已经存在的剩余消息
+         * 直接持久化到 SQLite，
+         * 防止进程退出导致内存数据丢失。
          */
-        while(true)
+        if (stop_requested_.load())
         {
-            /*
-             * Gateway 正在退出时，不再继续 MQTT 重连。
-             *
-             * return 会直接结束整个 workerLoop()，
-             * 因此 Worker 线程也会结束。
-             */
-            if (stop_requested_.load())
+            if (!offline_store_->save(message.device_id,payload,message.timestamp_ms))
             {
-                Logger::info(
-                    "Worker stopping; cancel MQTT retry"
+                Logger::error(
+                    "Failed to persist telemetry during shutdown, device="
+                    + message.device_id
                 );
-                return;
             }
+            continue;
+        }
 
-            /*
-             * 如果 MQTT 当前没有连接 Broker，
-             * 先尝试重新建立连接。
-             */
-            if (!mqtt_publisher_->isConnected())
-            {
-                Logger::warn(
-                    "MQTT disconnected; attempting to reconnect"
-                );
-        
-                /*
-                 * 尝试重新连接 Broker。
-                 */
-                if (!mqtt_publisher_->connect())
-                {
-                    Logger::warn(
-                        "MQTT reconnect failed; retrying in 5 seconds"
-                    );
-                    /*
-                     * 当前采用最简单的固定重试间隔。
-                     * 这里只暂停 Worker，不会阻塞 TcpConnector I/O 线程。
-                     */
-                    if (!waitForMqttRetry())
-                    {
-                        Logger::info(
-                            "Worker stopping during MQTT reconnect wait"
-                        );
-                        return;
-                    }
-                    continue;
-                }
-                Logger::info(
-                    "MQTT connection restored"
-                );
-            }
-                /*
-                * MQTT 已连接，尝试发布当前遥测消息。
-                */ 
+        /*
+         * MQTT 在线时优先直接发布实时消息。
+         */
+        if (mqtt_publisher_->isConnected())
+        {
             if (mqtt_publisher_->publish(payload))
             {
                 Logger::debug(
@@ -399,25 +408,62 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
                     + ", sequence="
                     + std::to_string(message.sequence)
                 );
-                /*
-                * 当前消息发送成功。
-                * break 只退出当前的 MQTT 重试循环，
-                * 外层 while 会继续从 TelemetryQueue 获取下一条消息。
-                */
-                break;
+                continue;
             }
-
             /*
-            * publish() 失败通常意味着连接刚刚发生异常。
-            *
-            * 等待一段时间后，下一轮循环会再次检查连接状态，
-            * 必要时重新执行 connect()。
-            */
+             * isConnected() 刚才虽然为 true，
+             * 但 publish() 仍可能因为网络在此刻异常而失败。
+             *
+             * 当前消息不能丢，因此下面仍会保存到 SQLite。
+             *
+             * 同时将下一次重连安排在 5 秒以后，
+             * 防止后续循环立即高频重连。
+             */
             Logger::warn(
-                "MQTT publish failed; retrying in 5 seconds"
+                "MQTT publish failed; storing telemetry offline"
             );
-            std::this_thread::sleep_for(
-                std::chrono::seconds(5)
+
+            mqtt_publisher_->disconnect();
+            next_mqtt_reconnect_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
+        else
+        {
+            Logger::warn(
+                "MQTT unavailable; storing telemetry offline"
+            );
+        }
+
+        /*
+         * MQTT 当前不可用，或者刚才 publish 失败。
+         *
+         * 把已经转换好的 MQTT JSON Payload
+         * 持久化到 SQLite。
+         *
+         * 保存完成后不阻塞当前消息，
+         * Worker 下一轮继续消费 TelemetryQueue。
+         */
+        if (!offline_store_->save(message.device_id,payload,message.timestamp_ms))
+        {
+            /*
+             * 当前阶段 SQLite 是最后一道持久化保障。
+             *
+             * 如果 save() 也失败，
+             * 当前消息无法安全保留，因此必须明确记录错误。
+             */
+            Logger::error(
+                "Failed to persist offline telemetry, device="
+                + message.device_id
+                + ", sequence="
+                + std::to_string(message.sequence)
+            );
+        }
+        else
+        {
+            Logger::info(
+                "Telemetry stored offline, device="
+                + message.device_id
+                + ", sequence="
+                + std::to_string(message.sequence)
             );
         }
     }
