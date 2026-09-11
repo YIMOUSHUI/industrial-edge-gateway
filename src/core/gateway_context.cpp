@@ -59,6 +59,26 @@ bool GatewayContext::start(const std::string& config_path)
         }
     }
 
+    /*
+    * 初始化 SQLite 离线存储。
+    *
+    * 当前阶段暂时使用 gateway.db 作为数据库文件，
+    * 后续会将数据库路径移动到 gateway.yaml 配置中。
+    *
+    * OfflineStore 必须在 Worker 线程启动之前完成初始化，
+    * 因为后续 Worker 会使用该组件保存和读取离线消息。
+    */
+    offline_store_ = std::make_unique<OfflineStore>("gateway.db");
+    if (!offline_store_->open())
+    {
+        Logger::error(
+            "Failed to initialize offline SQLite store"
+        );
+        return false;
+    }
+    Logger::info("Offline SQLite store initialized");
+
+
     for (const ConnectorConfig& connector_config :config.connectors)          
     {
         if (!connector_config.enabled)
@@ -173,6 +193,18 @@ void GatewayContext::stop()
     if (mqtt_publisher_)
     {
         mqtt_publisher_->disconnect();
+    }
+
+    /*
+    * Worker 已经退出后再关闭 SQLite。
+    *
+    * 这样可以保证不会出现：
+    * Worker仍在访问 OfflineStore，
+    * 但数据库句柄已经被提前关闭的情况。
+    */
+    if (offline_store_)
+    {
+        offline_store_->close();
     }
     Logger::info("Gateway stopped");
 }
@@ -350,7 +382,6 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
                         );
                         return;
                     }
-  
                     continue;
                 }
                 Logger::info(

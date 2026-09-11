@@ -4,8 +4,31 @@
 #include <cstddef>
 #include <mutex>
 #include <queue>
+#include <chrono>
 
 #include "model/telemetry_message.h"
+
+
+/**
+ * @brief TelemetryQueue 等待取消息的结果。
+ *
+ * Message：
+ *   成功从 Queue 中取得一条 TelemetryMessage。
+ *
+ * Timeout：
+ *   在指定时间内没有消息到达，
+ *   但 Queue 仍然正常运行。
+ *
+ * Stopped：
+ *   Queue 已经停止并且没有剩余消息，
+ *   调用线程应结束等待。
+ */
+enum class QueuePopResult
+{
+    Message,
+    Timeout,
+    Stopped
+};
 
 class TelemetryQueue
 {
@@ -14,6 +37,34 @@ public:
 
     bool push(const TelemetryMessage& message);//Producer 调用
     bool waitAndPop(TelemetryMessage& message);//Consumer 调用
+
+
+    /**
+     * @brief 等待一条遥测消息，但最多等待指定时间。
+     *
+     * 与 waitAndPop() 的区别：
+     *
+     * waitAndPop()：
+     *   Queue 为空时会一直等待，直到有消息或 Queue stop。
+     *
+     * waitAndPopFor()：
+     *   Queue 为空时最多等待 timeout，
+     *   即使没有消息也会在超时后返回。
+     *
+     * @param message 成功取出消息时，用于接收消息内容。
+     * @param timeout 本次最多等待多长时间。
+     *
+     * @return QueuePopResult::Message
+     *         成功取得一条消息。
+     *
+     * @return QueuePopResult::Timeout
+     *         等待超时，但 Queue 仍正常运行。
+     *
+     * @return QueuePopResult::Stopped
+     *         Queue 已停止并且没有剩余消息。
+     */
+    QueuePopResult waitAndPopFor(TelemetryMessage& message,std::chrono::milliseconds timeout);
+
 
     void stop();
 

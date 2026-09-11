@@ -11,6 +11,7 @@
 #include "model/telemetry_message.h"
 #include "common/config.h"
 #include "mqtt/mqtt_publisher.h"
+#include "storage/offline_store.h"
 
 class GatewayContext
 {
@@ -44,6 +45,22 @@ private:
     std::thread worker_thread_;
 
     std::unique_ptr<MqttPublisher> mqtt_publisher_;//unique_ptr允许延迟创建对象，初始为 nullptr
+
+    /**
+     * @brief SQLite 离线消息存储组件。
+     *
+     * GatewayContext 独占 OfflineStore。
+     *
+     * Gateway 启动后创建并打开数据库，
+     * Worker 后续通过该对象保存和补发离线消息。
+     *
+     * nullptr：
+     *   OfflineStore 尚未创建或不可用。
+     *
+     * 非 nullptr：
+     *   OfflineStore 对象已经创建。
+     */
+    std::unique_ptr<OfflineStore> offline_store_;
 
     /**
      * @brief Gateway 停止请求标志。

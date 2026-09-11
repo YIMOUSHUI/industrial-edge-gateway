@@ -53,11 +53,101 @@ bool TelemetryQueue::waitAndPop(TelemetryMessage& message)//【Worker线程】 �
     return true;
 }
 
+/**
+ * @brief 在指定时间内等待并取出一条 TelemetryMessage。
+ *
+ * 该接口用于需要周期性执行维护任务的 Worker。
+ * 即使当前没有新消息，Worker 也可以在 timeout 到期后醒来，
+ * 继续执行 MQTT 重连、离线消息补发等逻辑。
+ */
+QueuePopResult TelemetryQueue::waitAndPopFor(TelemetryMessage& message,std::chrono::milliseconds timeout)
+{
+    /*
+     * condition_variable::wait_for() 需要 unique_lock。
+     *
+     * 等待期间：
+     *   wait_for() 会自动释放 mutex，
+     *   允许生产者线程调用 push()。
+     *
+     * 被唤醒后：
+     *   wait_for() 会重新获得 mutex，
+     *   然后继续检查 Queue 状态。
+     */
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    /*
+     * 最多等待 timeout。
+     *
+     * predicate 为 true 的条件：
+     *
+     * 1. stopped_ == true
+     *    Queue 已经收到停止请求；
+     *
+     * 2. !queue_.empty()
+     *    Queue 中已经有消息可以处理。
+     *
+     * wait_for() 返回：
+     *
+     * true：
+     *   predicate 在等待结束时成立。
+     *
+     * false：
+     *   等待时间到达，但 predicate 仍然不成立。
+     */
+    const bool ready = condition_.wait_for(
+        lock,
+        timeout,
+        [this]()
+        {
+            return stopped_ || !queue_.empty();
+        }
+    );
+
+    /*
+     * ready == false：
+     *
+     * 说明等待时间已经到达，
+     * 但 Queue 既没有停止，也没有新消息。
+     *
+     * 这是正常超时，不是错误。
+     */
+    if (!ready)
+    {
+        return QueuePopResult::Timeout;
+    }
+
+    /*
+     * Queue 已经停止，并且没有剩余消息。
+     *
+     * 此时不会再产生新的 TelemetryMessage，
+     * 调用线程可以安全结束。
+     */
+    if (stopped_ && queue_.empty())
+    {
+        return QueuePopResult::Stopped;
+    }
+
+    /*
+     * 能运行到这里说明 Queue 中存在消息。
+     *
+     * 即使 stopped_ 已经为 true，
+     * 只要 Queue 中仍有剩余消息，
+     * 当前实现仍然允许把已有消息取出。
+     *
+     * 这样保持和原 waitAndPop() 类似的“先处理剩余数据”语义。
+     */
+    message = std::move(queue_.front());
+    queue_.pop();
+
+    return QueuePopResult::Message;
+}
+
+
+
 void TelemetryQueue::stop()
 {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-
         stopped_ = true;
     }
 

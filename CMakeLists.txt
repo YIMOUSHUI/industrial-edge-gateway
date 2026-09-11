@@ -9,6 +9,7 @@ find_package(yaml-cpp REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(PahoMqttCpp REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 add_executable(gatewayd
     src/main.cpp
@@ -22,6 +23,8 @@ add_executable(gatewayd
     src/converters/telemetry_converter.cpp
 
     src/mqtt/mqtt_publisher.cpp
+
+    src/storage/offline_store.cpp
 
     src/common/config.cpp
     src/common/logger.cpp
@@ -42,6 +45,7 @@ target_link_libraries(gatewayd
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     PahoMqttCpp::paho-mqttpp3
+    SQLite::SQLite3
 )
 
 target_link_libraries(tcp_device_simulator
