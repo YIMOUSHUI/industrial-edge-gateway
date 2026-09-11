@@ -210,6 +210,137 @@ void GatewayContext::handleMessage(const TelemetryMessage& message)
 }
 
 /**
+ * @brief 补发一批 SQLite 中待发送的离线遥测数据。
+ *
+ * 当前每轮最多处理 100 条记录。
+ *
+ * 只有 MQTT 当前已经连接时才执行补发。
+ * 每条记录必须满足：
+ *
+ * SQLite读取
+ *     ↓
+ * MQTT publish成功
+ *     ↓
+ * SQLite remove
+ *
+ * 严禁在 publish 成功之前删除数据库记录，
+ * 否则网络发送失败时会造成数据永久丢失。
+ */
+void GatewayContext::flushOfflineBatch()
+{
+    /*
+     * OfflineStore 或 MQTT Publisher 尚未创建时，
+     * 当前没有补发条件。
+     */
+    if (!offline_store_ || !mqtt_publisher_)
+    {
+        return;
+    }
+
+    /*
+     * Broker 当前没有连接时不能执行补发。
+     *
+     * MQTT 重连由 workerLoop() 统一负责，
+     * 本函数只负责“连接已经正常以后”的历史数据补发。
+     */
+    if (!mqtt_publisher_->isConnected())
+    {
+        return;
+    }
+
+    /*
+     * 每次最多读取100条离线记录。
+     *
+     * loadPending() 内部使用：
+     *
+     * ORDER BY id ASC
+     * LIMIT 100
+     *
+     * 因此优先取得更早进入 SQLite 的记录。
+     */
+    const std::vector<OfflineMessage> pending_messages = offline_store_->loadPending(100);
+    if (pending_messages.empty())
+    {
+        return;
+    }
+
+    Logger::info("Flushing " + std::to_string(pending_messages.size()) + " offline message(s)");
+    
+    /*
+     * 逐条补发本批离线记录。
+     */
+    for (const OfflineMessage& offline_message : pending_messages)
+    {
+        /*
+         * Gateway 已开始停止时，
+         * 不继续做新的网络补发操作。
+         *
+         * 数据仍然留在 SQLite，
+         * 下次 Gateway 启动后可以再次补发。
+         */
+        if (stop_requested_.load())
+        {
+            return;
+        }
+
+        /*
+         * 直接发送数据库中保存的 JSON Payload。
+         *
+         * 当初 save() 保存的就是 MQTT 最终要发送的 JSON，
+         * 因此这里无需重新构造 TelemetryMessage。
+         */
+        if (!mqtt_publisher_->publish(offline_message.payload))
+        {
+            Logger::warn("Failed to flush offline message id=" + std::to_string(offline_message.id));
+            
+            /*
+             * publish 失败通常说明 MQTT 连接已经异常。
+             *
+             * 主动断开当前 Client 状态，
+             * 后续由 workerLoop() 的统一重连逻辑负责恢复。
+             */
+            mqtt_publisher_->disconnect();
+
+            /*
+             * 当前记录没有 remove，
+             * 因此仍然安全保留在 SQLite。
+             */
+            return;
+        }
+
+        /*
+         * MQTT 已经成功发送当前离线消息。
+         *
+         * 此时才能删除 SQLite 中对应的记录。
+         */
+        if (!offline_store_->remove(offline_message.id))
+        {
+            Logger::error(
+                "Offline message published but failed to remove "
+                "SQLite record id="
+                + std::to_string(offline_message.id)
+            );
+
+            /*
+             * 删除失败时立即停止本批处理。
+             *
+             * 数据库记录仍然存在，因此以后可能发生重复发送。
+             * 这比“消息已经删除但实际上没发送出去”更安全。
+             */
+            return;
+        }
+
+        Logger::info(
+            "Offline message flushed, id="
+            + std::to_string(offline_message.id)
+            + ", device="
+            + offline_message.device_id
+        );
+    }
+    
+}
+
+/**
  * @brief Gateway 遥测业务 Worker 主循环。
  *
  * Worker 负责：
@@ -338,6 +469,31 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
 
             }
 
+        }
+        /*
+        * MQTT 当前已经连接时，
+        * 尝试补发一批 SQLite 历史离线消息。
+        *
+        * 即使本轮 Queue 没有新的设备数据，
+        * waitAndPopFor() 超时醒来后也会运行到这里，
+        * 因此 Broker 恢复以后无需等待设备再次发消息，
+        * 历史数据就能够自动恢复发送。
+        */
+        if (mqtt_publisher_->isConnected()&& !stop_requested_.load())
+        {
+            flushOfflineBatch();
+
+            /*
+            * flushOfflineBatch() 中如果历史消息 publish 失败，
+            * 会主动 disconnect()。
+            *
+            * 此时重新安排下一次 MQTT 重连时间，
+            * 防止下一轮马上高频执行 connect()。
+            */
+           if (!mqtt_publisher_->isConnected())
+            {
+                next_mqtt_reconnect_time =std::chrono::steady_clock::now()+ std::chrono::seconds(5);
+            }
         }
 
         /*

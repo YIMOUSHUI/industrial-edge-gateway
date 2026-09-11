@@ -22,6 +22,28 @@ private:
     
     void workerLoop();
 
+    /**
+     * @brief 补发一批 SQLite 中等待发送的离线遥测消息。
+     *
+     * 前提：
+     * MQTT 当前已经连接 Broker。
+     *
+     * 本函数每次最多读取并处理一批离线记录，
+     * 避免大量历史数据长时间占用 Worker，
+     * 影响实时 TelemetryMessage 的正常处理。
+     *
+     * 对每条记录：
+     * 1. 从 SQLite 读取；
+     * 2. 通过 MQTT publish；
+     * 3. publish 成功后删除 SQLite 记录；
+     * 4. publish 失败时立即停止本轮补发。
+     *
+     * 如果 MQTT publish 失败，
+     * 本函数会断开当前 MQTT Client，
+     * 后续由 Worker 的重连逻辑重新建立连接。
+     */
+    void flushOfflineBatch();
+
     Config config_;
 
     std::vector<std::unique_ptr<IConnector>> connectors_;
