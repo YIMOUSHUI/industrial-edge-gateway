@@ -25,6 +25,42 @@ void MockConnector::setMessageCallback(MessageCallback callback)
     message_callback_ = callback;
 }
 
+/**
+ * @brief Mock设备下行命令处理。
+ *
+ * 当前仅用于验证CommandRouter和统一IConnector下行接口，
+ * 不进行真实网络发送。
+ */
+bool MockConnector::sendCommand(const DeviceCommand& command)
+{
+    /*
+     * MockConnector 当前只有一台模拟设备：
+     * mock-device-01。
+     *
+     * 如果Router错误地将其他设备的命令交给这里，
+     * 明确返回失败。
+     */
+    if (command.device_id != "mock-device-01")
+    {
+        Logger::warn(
+            "MockConnector cannot handle device: "
+            + command.device_id
+        );
+
+        return false;
+    }
+
+    Logger::info(
+        "MockConnector executed command: request_id="
+        + command.request_id
+        + ", action="
+        + command.action
+        + ", parameters="
+        + command.parameters.dump()
+    );
+    return true;
+}
+
 void MockConnector::generateTestMessage()
 {
     TelemetryMessage message;

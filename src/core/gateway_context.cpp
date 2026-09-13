@@ -1,8 +1,11 @@
 #include "core/gateway_context.h"
+#include "core/command_queue.h"
 #include "connectors/mock_connector.h"
 #include "connectors/tcp_connector.h"
 #include "converters/telemetry_converter.h"
+#include "converters/command_converter.h"
 #include "common/logger.h"
+
 
 #include <utility>
 #include <memory>
@@ -38,8 +41,17 @@ bool GatewayContext::start(const std::string& config_path)
                 config.mqtt.server_uri,
                 config.mqtt.client_id,
                 config.mqtt.topic,
+                config.mqtt.command_topic,
                 config.mqtt.qos
             );
+        
+        mqtt_publisher_->setCommandCallback(
+            [this](const std::string& topic,const std::string& payload)
+            {
+                handleCommandPayload(topic,payload);
+            }
+        );
+
         /*
         * 启动阶段尝试进行第一次 MQTT 连接。
         *
@@ -89,10 +101,20 @@ bool GatewayContext::start(const std::string& config_path)
         if (connector_config.type == "mock")
         {
             auto connector = std::make_unique<MockConnector>();
+
+            /*
+            * connector.get() 取得 unique_ptr 当前管理对象的原始指针。
+            *
+            * unique_ptr 仍然拥有对象；
+            * source_connector 只是用于标记消息来源，
+            * 不参与对象释放。get() 不会转移所有权。
+            */
+            IConnector* source_connector =connector.get();
+
             connector->setMessageCallback(
-                [this](const TelemetryMessage& message)
+                [this,source_connector](const TelemetryMessage& message)
                 {
-                    handleMessage(message);
+                    handleMessage(message,source_connector);
                 }
              );
             connectors_.push_back(std::move(connector));
@@ -100,13 +122,16 @@ bool GatewayContext::start(const std::string& config_path)
         else if(connector_config.type == "tcp")
         {
             auto connector = std::make_unique<TcpConnector>(connector_config.port);
+            IConnector* source_connector =connector.get();
+
             connector->setMessageCallback(
-                [this](const TelemetryMessage& message)
+                [this, source_connector](const TelemetryMessage& message)
                 {
-                    handleMessage(message);
+                    handleMessage(message,source_connector);
                 }
             );
-             connectors_.push_back(std::move(connector));
+
+            connectors_.push_back(std::move(connector));
         }
     }
 
@@ -119,7 +144,15 @@ bool GatewayContext::start(const std::string& config_path)
         }
     }
 
-    worker_thread_ =std::thread(&GatewayContext::workerLoop,this);//创建工作者线程
+    worker_thread_ = std::thread(&GatewayContext::workerLoop,this);//创建工作者线程
+
+    /*
+    * 启动独立的下行Command Worker。
+    *
+    * 它负责消费CommandQueue，
+    * 与Telemetry Worker相互独立。
+    */
+    command_worker_thread_ = std::thread(&GatewayContext::commandWorkerLoop,this);
 
     Logger::info("Gateway started");
     return true;
@@ -168,6 +201,12 @@ void GatewayContext::stop()
     telemetry_queue_.stop();
 
     /*
+    * 停止CommandQueue，
+    * 唤醒可能正在waitAndPop()等待命令的Command Worker。
+    */
+    command_queue_.stop();
+
+    /*
      * 第五步：等待 Worker 自己正常退出。
      *
      * join() 不会强制杀死 Worker，
@@ -178,6 +217,14 @@ void GatewayContext::stop()
         worker_thread_.join();
     }
     
+    /*
+    * 等待Command Worker完成剩余命令并正常退出。
+    */
+    if (command_worker_thread_.joinable())
+    {
+        command_worker_thread_.join();
+    }
+
     /*
      * 第六步：Worker 已经不再使用 MQTT Publisher，
      * 此时可以安全断开 Broker 连接。
@@ -201,13 +248,100 @@ void GatewayContext::stop()
     Logger::info("Gateway stopped");
 }
 
-void GatewayContext::handleMessage(const TelemetryMessage& message)
+void GatewayContext::handleMessage(const TelemetryMessage& message,IConnector* source_connector)
 {
+     /*
+     * 设备已经通过该Connector成功产生了一条有效遥测数据，
+     * 因此更新它当前所属的下行路由。
+     *
+     * 例如：
+     *
+     * sensor-001 -> TcpConnector
+     */
+    command_router_.registerDevice(message.device_id,source_connector);
+
+    /*
+     * 原有上行链路保持不变。
+     */
     if (!telemetry_queue_.push(message)) //“生产者”
     {
         Logger::warn("Telemetry queue is full or stopped");
     }
 }
+
+/**
+ * @brief Gateway接收到MQTT下行Command后的业务入口。
+ *
+ * 当前职责：
+ * 1. 接收MqttPublisher转发来的原始Payload；
+ * 2. 使用CommandConverter完成解析和公共字段校验；
+ * 3. 得到统一DeviceCommand。
+ *
+ * 当前阶段暂时只打印解析结果。
+ * 下一阶段才交给CommandRouter。
+ */
+void GatewayContext::handleCommandPayload(const std::string& topic,const std::string& payload)
+{
+    Logger::info("Gateway received MQTT command, topic=" + topic);
+
+    DeviceCommand command;
+     /*
+     * 外部MQTT JSON
+     *      ↓
+     * CommandConverter
+     *      ↓
+     * DeviceCommand
+     */
+    if (!CommandConverter::fromJson(payload,command))
+    {
+        Logger::warn(
+            "MQTT command rejected because payload is invalid"
+        );
+        return;
+    }
+
+    /*
+     * 到这里说明：
+     *
+     * request_id
+     * device_id
+     * action
+     *
+     * 已经完成基本合法性检查。
+     */
+    Logger::info("Command parsed successfully: request_id="
+        + command.request_id
+        + ", device_id="
+        + command.device_id
+        + ", action="
+        + command.action
+        + ", parameters="
+        + command.parameters.dump()
+    );
+
+   /*
+    * Command已经完成解析和公共字段校验。
+    *
+    * 此处不直接执行设备控制，
+    * 而是立即放入CommandQueue，
+    * 让MQTT回调路径尽快返回。
+    */
+    if (!command_queue_.push(command))
+    {
+        Logger::warn(
+            "Command queue is full or stopped, request_id="
+            + command.request_id
+        );
+
+        return;
+    }
+
+    Logger::debug(
+        "Command queued successfully, request_id="
+        + command.request_id
+    );
+}
+
 
 /**
  * @brief 补发一批 SQLite 中待发送的离线遥测数据。
@@ -626,3 +760,60 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
     Logger::info("Telemetry worker stopped");
 }
    
+/**
+ * @brief Gateway下行Command Worker主循环。
+ *
+ * 当前职责：
+ * 1. 阻塞等待CommandQueue中的DeviceCommand；
+ * 2. 取出命令；
+ * 3. 记录结构化命令信息。
+ *
+ * 下一阶段将在这里调用CommandRouter，
+ * 将命令真正路由到TCP/CAN/Modbus Connector。
+ */
+void GatewayContext::commandWorkerLoop()
+{
+    DeviceCommand command;
+    /*
+     * waitAndPop()：
+     *
+     * 有命令：
+     *   返回true，继续处理。
+     *
+     * 没命令：
+     *   当前线程睡眠，不占用CPU空转。
+     *
+     * Queue stop且已经没有剩余命令：
+     *   返回false，while结束。
+     */
+    while(command_queue_.waitAndPop(command))
+    {
+        Logger::info("Command worker received command: request_id="
+            + command.request_id
+            + ", device_id="
+            + command.device_id
+            + ", action="
+            + command.action
+            + ", parameters="
+            + command.parameters.dump()
+        );
+
+        /*
+        * 将已经结构化的DeviceCommand交给CommandRouter。
+        *
+        * Router负责根据device_id找到目标Connector，
+        * Connector再决定该协议具体怎样执行命令。
+        */
+        if (!command_router_.dispatch(command))
+        {
+            Logger::warn(
+                "Command dispatch failed, request_id="
+                + command.request_id
+                + ", device_id="
+                + command.device_id
+            );
+        }
+
+    }
+    Logger::info("Command worker stopped");
+}

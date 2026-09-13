@@ -5,6 +5,8 @@
 #include <atomic>
 
 #include "core/telemetry_queue.h"
+#include "core/command_queue.h"
+#include "core/command_router.h"
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
@@ -18,9 +20,36 @@ public:
     void stop();
 
 private:
-    void handleMessage(const TelemetryMessage& message);//GatewayContext 收到设备数据以后统一进入的入口
+    /**
+     * @brief Gateway 统一上行消息入口。
+     *
+     * 除了将TelemetryMessage放入TelemetryQueue，
+     * 同时根据消息来源更新设备到Connector的下行路由。
+     *
+     * @param message 设备遥测数据。
+     * @param source_connector 实际收到该数据的Connector。
+     */
+    void handleMessage(const TelemetryMessage& message,IConnector* source_connector);//GatewayContext 收到设备数据以后统一进入的入口
     
+    /**
+     * @brief MQTT 下行 Command 消息入口。
+     *
+     * 当前阶段只验证 Subscribe + Callback 链路，
+     * 因此暂时只记录收到的原始 JSON Payload。
+     *
+     * 下一阶段将在这里完成：
+     * JSON → DeviceCommand → Command Router。
+     */
+    void handleCommandPayload(const std::string& topic,const std::string& payload);
+
     void workerLoop();
+    /**
+     * @brief Command Worker线程入口。
+     *
+     * 当前阶段只从CommandQueue取出DeviceCommand并记录日志。
+     * 下一阶段再将命令交给CommandRouter。
+     */
+    void commandWorkerLoop();
 
     /**
      * @brief 补发一批 SQLite 中等待发送的离线遥测消息。
@@ -50,7 +79,39 @@ private:
 
     TelemetryQueue telemetry_queue_{1000};
 
+    /**
+     * @brief MQTT下行设备命令队列。
+     *
+     * Producer：
+     *   MQTT Command回调路径。
+     *
+     * Consumer：
+     *   Command Worker线程。
+     *
+     * 当前设置最多缓存100条待执行Command。
+     */
+    CommandQueue command_queue_{100};
+
+    /**
+     * @brief 下行设备命令路由表。
+     *
+     * 负责维护：
+     * device_id -> Connector
+     *
+     * Command Worker 从 CommandQueue 取得命令后，
+     * 通过该对象找到目标 Connector。
+     */
+    CommandRouter command_router_;
+
+
     std::thread worker_thread_;
+    /**
+     * @brief 下行Command业务Worker线程。
+     *
+     * 专门从CommandQueue消费DeviceCommand，
+     * 后续负责调用CommandRouter执行设备控制。
+     */
+    std::thread command_worker_thread_;
 
     std::unique_ptr<MqttPublisher> mqtt_publisher_;//unique_ptr允许延迟创建对象，初始为 nullptr
 

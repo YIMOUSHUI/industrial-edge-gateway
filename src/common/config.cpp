@@ -51,6 +51,16 @@ bool Config::load(const std::string& path)
             {
                 data_.mqtt.topic = mqtt_node["topic"].as<std::string>();
             }
+            /*
+            * MQTT 下行 Command Topic。
+            *
+            * 配置不存在时保留 MqttConfig 中定义的默认值。
+            */
+            if (mqtt_node["command_topic"])
+            {
+                data_.mqtt.command_topic =
+                    mqtt_node["command_topic"].as<std::string>();
+            }
             if (mqtt_node["qos"])
             {
                 data_.mqtt.qos = mqtt_node["qos"].as<int>();

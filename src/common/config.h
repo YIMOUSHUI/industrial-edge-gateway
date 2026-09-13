@@ -20,7 +20,18 @@ struct MqttConfig
 
     std::string client_id = "gateway-01";
 
+    /**
+     * @brief 遥测数据上行 Topic。
+    */
     std::string topic = "gateway/gateway-01/telemetry";
+
+    /**
+     * @brief Gateway MQTT 下行命令订阅 Topic。
+     *
+     * 云端或测试客户端向该 Topic publish 命令后，
+     * Broker 会将消息转发给订阅该 Topic 的 gatewayd。
+     */
+    std::string command_topic = "gateway/gateway-01/command";
 
     int qos = 1;
 };

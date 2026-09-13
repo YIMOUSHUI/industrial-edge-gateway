@@ -16,11 +16,14 @@ add_executable(gatewayd
 
     src/core/gateway_context.cpp
     src/core/telemetry_queue.cpp
+    src/core/command_queue.cpp
+    src/core/command_router.cpp
     
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp
 
     src/converters/telemetry_converter.cpp
+    src/converters/command_converter.cpp
 
     src/mqtt/mqtt_publisher.cpp
 
