@@ -14,11 +14,13 @@ find_package(SQLite3 REQUIRED)
 add_executable(gatewayd
     src/main.cpp
 
+    src/control/gateway_control_server.cpp
+
     src/core/gateway_context.cpp
     src/core/telemetry_queue.cpp
     src/core/command_queue.cpp
     src/core/command_router.cpp
-    
+
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp
 
@@ -35,6 +37,10 @@ add_executable(gatewayd
 
 add_executable(tcp_device_simulator
     tools/tcp_device_simulator.cpp
+)
+
+add_executable(gatewayctl
+    tools/gatewayctl.cpp
 )
 
 target_include_directories(gatewayd

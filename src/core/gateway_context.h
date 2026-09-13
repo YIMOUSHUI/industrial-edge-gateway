@@ -3,6 +3,8 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <vector>
+#include <string>
 
 #include "core/telemetry_queue.h"
 #include "core/command_queue.h"
@@ -12,12 +14,36 @@
 #include "common/config.h"
 #include "mqtt/mqtt_publisher.h"
 #include "storage/offline_store.h"
+#include "control/gateway_control_server.h"
 
 class GatewayContext
 {
 public: 
     bool start(const std::string& config_path);
     void stop();
+
+    /**
+     * @brief 获取整个Gateway当前在线设备ID列表。
+     *
+     * 本函数不会维护第二份设备状态。
+     * 它会遍历当前所有Connector，
+     * 调用各Connector自己的getOnlineDevices()，
+     * 再把结果汇总后返回。
+     *
+     * @return 当前所有Connector在线设备ID的快照。
+     */
+    std::vector<std::string> getOnlineDevices();
+
+    /**
+     * @brief 查询当前MQTT是否处于连接状态。
+     *
+     * GatewayContext本身不维护第二份MQTT连接状态，
+     * 而是直接查询MqttPublisher中的真实连接状态。
+     *
+     * @return true  当前MQTT已连接。
+     * @return false MQTT未启用、Publisher不存在或当前未连接。
+     */
+    bool isMqttConnected() const;
 
 private:
     /**
@@ -142,5 +168,13 @@ private:
      */
     std::atomic<bool> stop_requested_{false};
 
+    /*
+    * gatewayd内部的UDS管理服务。
+    *
+    * GatewayContext拥有它的生命周期：
+    * start()时创建并启动，
+    * stop()时停止并销毁。
+    */
+    std::unique_ptr<GatewayControlServer> control_server_;
 };
 

@@ -1333,3 +1333,79 @@ bool TcpConnector::updateClientEvents(int client_fd,bool want_write)
     }
     return true;
 }
+
+std::vector<std::string>TcpConnector::getOnlineDevices()
+{
+    /*
+     * 返回值使用一个局部vector。
+     *
+     * 我们只把当前device_id复制出来，
+     * 不把内部device_fds_直接暴露给外部。
+     */
+    std::vector<std::string> devices;
+
+     /*
+     * device_fds_会被TcpConnector I/O线程修改，
+     * 以后又会被管理线程查询。
+     *
+     * 所以读取时仍然使用已有的device_map_mutex_保护。
+     */
+    {
+        std::lock_guard<std::mutex> lock(
+            device_map_mutex_
+        );
+
+        /*
+         * 预留足够空间。
+         *
+         * reserve()不是功能必须，
+         * 只是因为我们已经知道最多要放多少个device_id，
+         * 可以减少vector扩容次数。
+         */
+        devices.reserve(device_fds_.size());
+
+        /*
+         * device_fds_结构类似：
+         *
+         * sensor-001 -> 8
+         * sensor-002 -> 10
+         *
+         * gatewayctl只需要device_id，
+         * 所以这里只取map中的key。
+         */
+        for (const auto& [device_id, client_fd]: device_fds_)
+        {
+            /*
+             * 当前client_fd在这个查询里不需要使用。
+             *
+             * 这里只把device_id复制到结果中。
+             */
+            (void)client_fd;
+            devices.push_back(device_id);
+        }
+    }
+
+    /*
+     * 到这里mutex已经释放。
+     *
+     * 返回的是一份“查询瞬间”的设备列表快照。
+     *
+     * 后续即使真实device_fds_发生变化，
+     * 也不会影响这份已经返回的vector。
+     */
+    return devices;
+}
+
+std::size_t TcpConnector::onlineDeviceCount()
+{
+    /*
+     * 即使这里只读取size()，
+     * device_fds_也可能正在被I/O线程修改，
+     * 所以同样需要加锁。
+     */
+    std::lock_guard<std::mutex> lock(
+        device_map_mutex_
+    );
+
+    return device_fds_.size();
+}

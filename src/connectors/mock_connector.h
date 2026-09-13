@@ -19,6 +19,7 @@ public:
      * 当前只通过日志模拟命令执行成功。
      */
     bool sendCommand(const DeviceCommand& command) override;
+    std::vector<std::string> getOnlineDevices() override;
 
 private:
     void generateTestMessage();

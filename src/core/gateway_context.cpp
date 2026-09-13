@@ -154,8 +154,23 @@ bool GatewayContext::start(const std::string& config_path)
     */
     command_worker_thread_ = std::thread(&GatewayContext::commandWorkerLoop,this);
 
-    Logger::info("Gateway started");
-    return true;
+    /*
+    * MQTT、Connector、Telemetry Worker、
+    * Command Worker都已经启动完成。
+    *
+    * 最后再开放本地管理接口。
+    */
+    control_server_ = std::make_unique<GatewayControlServer>("/tmp/gateway.sock",*this);
+    if (!control_server_->start())
+    {
+        Logger::error(
+            "Failed to start GatewayControlServer"
+        );
+        control_server_.reset();
+        return false;
+    }
+        Logger::info("Gateway started");
+        return true;
 }
 
 /**
@@ -172,6 +187,18 @@ bool GatewayContext::start(const std::string& config_path)
  */
 void GatewayContext::stop()
 {
+    /*
+    * Control Server必须优先停止。
+    *
+    * 因为它仍然可能收到status/devices请求，
+    * 并访问下面的MQTT和Connector状态。
+    */
+    if (control_server_)
+    {
+        control_server_->stop();
+        control_server_.reset();
+    }
+    
     /*
      * 第一步：停止所有消息生产者。
      *
@@ -816,4 +843,82 @@ void GatewayContext::commandWorkerLoop()
 
     }
     Logger::info("Command worker stopped");
+}
+
+std::vector<std::string> GatewayContext::getOnlineDevices()
+{
+    /*
+     * all_devices：
+     * 用来保存整个Gateway汇总后的在线设备列表。
+     *
+     * 它只是当前查询产生的临时快照，
+     * 不是Gateway长期维护的第二份设备状态。
+     */
+    std::vector<std::string> all_devices;
+
+    /*
+     * connectors_里面保存的是：
+     *
+     * std::unique_ptr<IConnector>
+     *
+     * 虽然统一表现为IConnector，
+     * 但实际对象可能是：
+     *
+     * TcpConnector
+     * MockConnector
+     * 后续的CanConnector
+     * 后续的ModbusConnector
+     */
+    for (const auto& connector : connectors_)
+    {
+        /*
+         * 通过IConnector的虚函数调用。
+         *
+         * 如果实际对象是TcpConnector，
+         * 最终执行TcpConnector::getOnlineDevices()。
+         *
+         * 如果实际对象是MockConnector，
+         * 就执行MockConnector::getOnlineDevices()。
+         */
+        std::vector<std::string> devices = connector->getOnlineDevices();
+        /*
+         * 将当前Connector返回的设备列表
+         * 追加到整个Gateway的all_devices中。
+         *
+         * insert的位置：
+         * all_devices.end()
+         *
+         * 意思是从当前vector末尾继续追加。
+         */
+        all_devices.insert(all_devices.end(),devices.begin(),devices.end());
+    }
+    return all_devices;
+}
+
+bool GatewayContext::isMqttConnected() const
+{
+    /*
+     * mqtt_publisher_可能不存在。
+     *
+     * 例如：
+     * MQTT在配置中没有启用，
+     * 那么Gateway启动时可能就没有创建MqttPublisher。
+     *
+     * 所以不能直接：
+     *
+     * mqtt_publisher_->isConnected()
+     *
+     * 否则空指针会出问题。
+     */
+    if (!mqtt_publisher_)
+    {
+        return false;
+    }
+
+    /*
+     * 真正的连接状态仍然由MqttPublisher负责。
+     *
+     * GatewayContext这里只做统一查询入口。
+     */
+    return mqtt_publisher_->isConnected();
 }

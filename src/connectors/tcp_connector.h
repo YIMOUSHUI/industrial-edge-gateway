@@ -196,6 +196,22 @@ private:
      */
     bool updateClientEvents(int client_fd,bool want_write);
 
+    /**
+     * @brief 获取当前通过TCP连接在线的设备ID列表。
+     *
+     * 数据来源仍然是device_fds_，
+     * 本函数不会维护第二份在线设备状态。
+     *
+     * @return 当前在线设备ID的拷贝。
+     */
+    std::vector<std::string> getOnlineDevices() override;
+
+    /**
+     * @brief 获取当前TCP在线设备数量。
+     *
+     * @return 当前device_fds_中的设备数量。
+     */
+    std::size_t onlineDeviceCount();
 
 private:
     int port_;

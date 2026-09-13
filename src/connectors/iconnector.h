@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "model/telemetry_message.h"
 #include "model/command.h"
@@ -44,5 +45,27 @@ public:
      * @return false 命令无法发送或处理失败。
      */
     virtual bool sendCommand(const DeviceCommand& command) = 0;//所有 Connector 必须具有“下发命令”这个能力
+
+    /**
+     * @brief 获取当前由该Connector管理的在线设备ID列表。
+     *
+     * 不同协议Connector自己决定如何判断设备在线：
+     *
+     * TcpConnector
+     *   -> 根据当前TCP连接表查询
+     *
+     * CanConnector
+     *   -> 后续根据CAN设备状态查询
+     *
+     * ModbusConnector
+     *   -> 后续根据Modbus设备状态查询
+     *
+     * GatewayContext只使用这个统一接口，
+     * 不需要了解各协议内部如何保存设备状态。
+     *
+     * @return 当前在线设备ID列表的快照。
+     */
+    virtual std::vector<std::string> getOnlineDevices() = 0;
+
 };
 

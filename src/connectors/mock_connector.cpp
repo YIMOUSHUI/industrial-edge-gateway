@@ -81,3 +81,17 @@ void MockConnector::generateTestMessage()
     }
 
 }
+
+std::vector<std::string> MockConnector::getOnlineDevices()
+{
+    /*
+     * 当前MockConnector模拟的逻辑设备
+     * 就是mock-device-01。
+     *
+     * Mock本身只是测试Connector，
+     * 没有像TcpConnector那样维护真实socket连接表。
+     */
+    return {
+        "mock-device-01"
+    };
+}
