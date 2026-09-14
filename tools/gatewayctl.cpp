@@ -64,7 +64,7 @@ int main(int argc, char* argv[])
      */
     if (argc != 2)
     {
-        std::cerr<< "Usage: gatewayctl <status|devices>\n";
+        std::cerr<< "Usage: gatewayctl <status|devices|health>\n";
         return 1;
     }
 
@@ -88,9 +88,13 @@ int main(int argc, char* argv[])
      * 如果用户输入其他内容，
      * 直接在客户端这里提示，不需要再发给gatewayd。
      */
-    if (command != "status"&& command != "devices")
+    if (command != "status" && command != "devices" && command != "health")
     {
-        std::cerr<< "Unknown command: "<< command<< '\n';
+        std::cerr
+            << "Unknown command: "
+            << command
+            << '\n';
+
         return 1;
     }
 

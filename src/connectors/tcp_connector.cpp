@@ -197,6 +197,17 @@ void TcpConnector::stop()
         listen_fd_ = -1;
     }
 
+    /*
+    * I/O线程已经join完成，
+    * 后续不会再read/write wake_fd_，
+    * 现在可以安全释放eventfd。
+    */
+    if (wake_fd_ >= 0)
+    {
+        close(wake_fd_);
+        wake_fd_ = -1;
+    }
+
     if(epoll_fd_ >= 0)
     {
         close(epoll_fd_);

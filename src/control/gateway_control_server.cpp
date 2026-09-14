@@ -642,6 +642,37 @@ std::string GatewayControlServer::handleRequest(const std::string& request)
     }
 
     /*
+    * health：
+    *
+    * 第一版只根据MQTT连接状态
+    * 判断Gateway整体健康程度。
+    *
+    * MQTT正常：
+    *   healthy
+    *
+    * MQTT断开：
+    *   degraded
+    *
+    * 因为MQTT断开时Gateway仍然可以继续采集，
+    * 并通过SQLite进行离线缓存，
+    * 所以这里不认为整个Gateway已经不可用。
+    */
+    if (request == "health")
+    {
+        const bool mqtt_connected =
+            gateway_.isMqttConnected();
+
+        if (mqtt_connected)
+        {
+            return "Health: healthy\n";
+        }
+
+        return 
+            "Health: degraded\n"
+            "Reason: MQTT disconnected\n";
+    }
+
+    /*
      * 其他请求当前都不支持。
      */
     return "Unknown command: "+ request+ "\n";

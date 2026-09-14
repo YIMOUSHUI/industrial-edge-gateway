@@ -86,6 +86,11 @@ bool GatewayContext::start(const std::string& config_path)
         Logger::error(
             "Failed to initialize offline SQLite store"
         );
+        /*
+        * MQTT可能已经创建甚至连接成功，
+        * 所以启动失败前统一清理已经建立的资源。
+        */
+        stop();
         return false;
     }
     Logger::info("Offline SQLite store initialized");
@@ -140,6 +145,15 @@ bool GatewayContext::start(const std::string& config_path)
         if (!connector->start())
         {
             Logger::error("Failed to start connector: "+ connector->name());
+            
+            /*
+            * 前面的Connector可能已经成功启动。
+            *
+            * stop()会统一将已经启动的Connector关闭，
+            * 未启动的Connector执行stop()也能够安全处理。
+            */
+            stop();
+
             return false;
         }
     }
@@ -166,7 +180,16 @@ bool GatewayContext::start(const std::string& config_path)
         Logger::error(
             "Failed to start GatewayControlServer"
         );
-        control_server_.reset();
+        
+        /*
+        * 此时Connector、Telemetry Worker、
+        * Command Worker都已经启动。
+        *
+        * 必须统一stop()，
+        * 否则std::thread仍然处于joinable状态。
+        */
+        stop();
+
         return false;
     }
         Logger::info("Gateway started");
