@@ -2,6 +2,7 @@
 #include "core/command_queue.h"
 #include "connectors/mock_connector.h"
 #include "connectors/tcp_connector.h"
+#include "connectors/can_connector.h"
 #include "converters/telemetry_converter.h"
 #include "converters/command_converter.h"
 #include "common/logger.h"
@@ -136,6 +137,70 @@ bool GatewayContext::start(const std::string& config_path)
                 }
             );
 
+            connectors_.push_back(std::move(connector));
+        }
+        else if (connector_config.type == "can")
+        {
+            /*
+            * CAN Connector必须指定SocketCAN接口。
+            *
+            * 例如：
+            *
+            * Ubuntu开发环境：
+            *   interface: vcan0
+            *
+            * 真实CAN硬件：
+            *   interface: can0
+            */
+            if (connector_config.interface_name.empty())
+            {
+                Logger::error(
+                    "CAN connector interface is empty: "
+                    + connector_config.name
+                );
+
+                stop();
+                return false;
+            }
+
+             /*
+            * 根据gateway.yaml中的接口名称
+            * 创建CanConnector。
+            *
+            * 不再把vcan0写死在C++代码里。
+            */
+            auto connector = std::make_unique<CanConnector>(connector_config.interface_name);
+            
+            /*
+            * 保存当前Connector的原始指针。
+            *
+            * connectors_中的unique_ptr仍然负责对象生命周期，
+            * source_connector这里只用于告诉GatewayContext：
+            *
+            * “这条TelemetryMessage来自哪个Connector”。
+            */
+            IConnector* source_connector = connector.get();
+            
+             /*
+            * CAN帧在CanConnector内部完成解析后，
+            * 已经变成统一TelemetryMessage。
+            *
+            * 因此这里直接复用GatewayContext已有的
+            * handleMessage()入口。
+            */
+            connector->setMessageCallback(
+                [this, source_connector](const TelemetryMessage& message)
+                {
+                    handleMessage(message,source_connector);
+                }
+            );
+
+            /*
+            * 放入统一Connector容器。
+            *
+            * 后面的统一start()/stop()
+            * 会自动管理CanConnector生命周期。
+            */
             connectors_.push_back(std::move(connector));
         }
     }

@@ -23,6 +23,7 @@ add_executable(gatewayd
 
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp
+    src/connectors/can_connector.cpp
 
     src/converters/telemetry_converter.cpp
     src/converters/command_converter.cpp

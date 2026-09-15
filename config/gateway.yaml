@@ -15,6 +15,10 @@ connectors:
     type: tcp
     enabled: true
     port: 9000
+  - name: can-bus
+    type: can
+    enabled: true
+    interface: vcan0
 
 mqtt:
   enabled: true

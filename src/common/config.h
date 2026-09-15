@@ -9,7 +9,27 @@ struct ConnectorConfig
     std::string type;
     bool enabled = true;//成员默认初始化
 
+
+    /**
+     * @brief TCP Connector监听端口。
+     *
+     * 仅 type == "tcp" 时使用。
+     */
     int port = 0; //端口号
+
+    /**
+     * @brief Linux SocketCAN接口名称。
+     *
+     * 仅 type == "can" 时使用。
+     *
+     * Ubuntu虚拟CAN：
+     *   vcan0
+     *
+     * 真实CAN设备：
+     *   can0
+     */
+    std::string interface_name;
+
 };
 
 struct MqttConfig

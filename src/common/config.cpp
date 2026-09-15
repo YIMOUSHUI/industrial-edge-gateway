@@ -28,6 +28,21 @@ bool Config::load(const std::string& path)
                 connector.port = node["port"].as<int>();
             }
 
+            /*
+            * SocketCAN接口名称。
+            *
+            * 只有CAN Connector需要这个字段。
+            *
+            * 例如gateway.yaml：
+            *
+            *   type: can
+            *   interface: vcan0
+            */
+            if (node["interface"])
+            {
+                connector.interface_name =node["interface"].as<std::string>();
+            }
+
             data_.connectors.push_back(connector);
         }
 
