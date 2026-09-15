@@ -1,0 +1,1 @@
+/home/dda/linux/tool/buildroot-2025.02.17/output/host/bin/arm-buildroot-linux-gnueabihf-g++ CMakeFiles/gatewayctl.dir/tools/gatewayctl.cpp.o -o gatewayctl 

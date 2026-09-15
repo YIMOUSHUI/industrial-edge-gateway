@@ -255,7 +255,7 @@ int main(int argc, char* argv[])
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(9000);
 
-    if (inet_pton(AF_INET,"127.0.0.1",&server_addr.sin_addr) != 1)
+    if (inet_pton(AF_INET,"192.168.10.50",&server_addr.sin_addr) != 1)
     {
         std::cerr<< "inet_pton() failed"<< std::endl;
         close(sockfd);
