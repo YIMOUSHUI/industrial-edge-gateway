@@ -19,6 +19,13 @@ connectors:
     type: can
     enabled: true
     interface: vcan0
+  - name: plc-01
+    type: modbus
+    enabled: true
+    host: 127.0.0.1
+    port: 1502
+    device_id: modbus-plc-01
+    poll_interval_ms: 1000
 
 mqtt:
   enabled: true

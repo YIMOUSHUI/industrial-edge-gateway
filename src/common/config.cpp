@@ -43,6 +43,39 @@ bool Config::load(const std::string& path)
                 connector.interface_name =node["interface"].as<std::string>();
             }
 
+            /*
+            * Modbus TCP目标设备地址。
+            *
+            * 例如：
+            *   host: 127.0.0.1
+            */
+            if (node["host"])
+            {
+                connector.host =node["host"].as<std::string>();
+            }
+
+            /*
+            * Gateway内部统一设备ID。
+            *
+            * 例如：
+            *   device_id: modbus-plc-01
+            */
+            if (node["device_id"])
+            {
+                connector.device_id =node["device_id"].as<std::string>();
+            }
+
+            /*
+            * Modbus寄存器轮询周期。
+            *
+            * 例如：
+            *   poll_interval_ms: 1000
+            */
+            if (node["poll_interval_ms"])
+            {
+                connector.poll_interval_ms = node["poll_interval_ms"].as<std::uint32_t>();
+            }
+
             data_.connectors.push_back(connector);
         }
 

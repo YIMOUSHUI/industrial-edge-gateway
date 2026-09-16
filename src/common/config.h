@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 struct ConnectorConfig
 {
@@ -30,6 +31,31 @@ struct ConnectorConfig
      */
     std::string interface_name;
 
+    /**
+     * @brief 网络型南向设备的地址。
+     *
+     * 当前用于Modbus TCP：
+     *   127.0.0.1
+     *
+     * 后续真实PLC可能是：
+     *   192.168.10.xxx
+     */
+    std::string host;
+
+    /**
+     * @brief Gateway内部统一设备ID。
+     *
+     * 当前Modbus测试设备：
+     *   modbus-plc-01
+     */
+    std::string device_id;
+
+    /**
+     * @brief Modbus寄存器轮询周期，单位毫秒。
+     *
+     * 默认每1000ms读取一次。
+     */
+    std::uint32_t poll_interval_ms = 1000;
 };
 
 struct MqttConfig

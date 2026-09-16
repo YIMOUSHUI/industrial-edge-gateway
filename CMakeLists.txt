@@ -10,6 +10,7 @@ find_package(spdlog REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(PahoMqttCpp REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(PkgConfig REQUIRED)
 
 add_executable(gatewayd
     src/main.cpp
@@ -24,6 +25,7 @@ add_executable(gatewayd
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp
     src/connectors/can_connector.cpp
+    src/connectors/modbus_connector.cpp
 
     src/converters/telemetry_converter.cpp
     src/converters/command_converter.cpp
@@ -44,6 +46,26 @@ add_executable(gatewayctl
     tools/gatewayctl.cpp
 )
 
+# Modbus设备模拟器目前只用于Ubuntu开发环境。
+#
+# 后续ModbusConnector完成以后，
+# 再为Buildroot启用libmodbus并接入gatewayd。
+if(NOT CMAKE_CROSSCOMPILING)
+    pkg_check_modules(
+        LIBMODBUS
+        REQUIRED
+        IMPORTED_TARGET
+        libmodbus
+    )
+    add_executable(modbus_device_simulator
+        tools/modbus_device_simulator.cpp
+    )
+    target_link_libraries(modbus_device_simulator
+        PRIVATE
+        PkgConfig::LIBMODBUS
+    )
+endif()
+
 target_include_directories(gatewayd
     PRIVATE
     ${PROJECT_SOURCE_DIR}/src
@@ -56,6 +78,7 @@ target_link_libraries(gatewayd
     nlohmann_json::nlohmann_json
     PahoMqttCpp::paho-mqttpp3
     SQLite::SQLite3
+    PkgConfig::LIBMODBUS
 )
 
 target_link_libraries(tcp_device_simulator

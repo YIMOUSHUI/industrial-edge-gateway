@@ -3,6 +3,7 @@
 #include "connectors/mock_connector.h"
 #include "connectors/tcp_connector.h"
 #include "connectors/can_connector.h"
+#include "connectors/modbus_connector.h"
 #include "converters/telemetry_converter.h"
 #include "converters/command_converter.h"
 #include "common/logger.h"
@@ -203,6 +204,72 @@ bool GatewayContext::start(const std::string& config_path)
             */
             connectors_.push_back(std::move(connector));
         }
+        else if (connector_config.type == "modbus")
+        {
+            /*
+            * Modbus TCP必须知道：
+            *
+            * 1. 目标设备IP
+            * 2. 目标端口
+            * 3. Gateway内部device_id
+            *
+            * 这些字段缺失时不允许继续启动。
+            */
+            if (connector_config.host.empty() || connector_config.port <= 0 || connector_config.device_id.empty())
+            {
+                Logger::error("Invalid Modbus connector configuration: " + connector_config.name);
+                stop();
+                return false;
+            }
+
+            /*
+            * 根据gateway.yaml创建ModbusConnector。
+            *
+            * 当前实际参数：
+            *
+            * host             = 127.0.0.1
+            * port             = 1502
+            * device_id        = modbus-plc-01
+            * poll_interval_ms = 1000
+            */
+            auto connector = std::make_unique<ModbusConnector>(connector_config.host,connector_config.port,connector_config.device_id,connector_config.poll_interval_ms);
+            
+            /*
+            * 保存消息来源Connector。
+            *
+            * 后续Modbus轮询得到TelemetryMessage后，
+            * GatewayContext会利用它建立：
+            *
+            * modbus-plc-01 → ModbusConnector
+            *
+            * 的下行CommandRouter路由。
+            */
+            IConnector* source_connector = connector.get();
+            
+            /*
+            * 继续复用整个Gateway已有的统一遥测入口。
+            *
+            * ModbusConnector不直接操作MQTT或SQLite。
+            */
+            connector->setMessageCallback(
+                [this, source_connector](const TelemetryMessage& message)
+                {
+                    handleMessage(message,source_connector);
+                }
+            );
+            
+            /*
+            * 交给GatewayContext统一管理生命周期。
+            *
+            * 后面的：
+            *
+            * connector->start()
+            *
+            * 会自动调用ModbusConnector::start()。
+            */
+            connectors_.push_back(std::move(connector));
+        }
+
     }
 
     for (auto& connector : connectors_)
