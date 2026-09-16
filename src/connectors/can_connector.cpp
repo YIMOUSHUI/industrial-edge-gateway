@@ -14,6 +14,8 @@
 #include <cstring>
 #include <utility>
 #include <chrono>
+#include <cstdint>
+#include <exception>
 
 CanConnector::CanConnector(std::string interface_name): interface_name_(std::move(interface_name))
 {
@@ -461,19 +463,258 @@ std::vector<std::string> CanConnector::getOnlineDevices()
 bool CanConnector::sendCommand(const DeviceCommand& command)
 {
     /*
-     * CAN下行命令还没有进入正式实现阶段。
+     * Connector没有正常启动时不能发送CAN帧。
      *
-     * 这里暂时提供占位实现，是因为IConnector要求
-     * 每个Connector都实现sendCommand()。
+     * running_ == false：
+     *   当前Connector可能正在停止或尚未启动。
      *
-     * 下一步会真正把DeviceCommand转换成can_frame，
-     * 再通过SocketCAN发送。
+     * can_fd_ < 0：
+     *   当前没有有效SocketCAN socket。
      */
-    (void)command;
+    if (!running_ || can_fd_ < 0)
+    {
+        Logger::warn("Cannot send CAN command: connector is not running");
+        return false;
+    }
 
-    Logger::warn(
-        "CAN command sending is not implemented yet"
-    );
+    /*
+     * 当前CanConnector使用统一设备ID格式：
+     *
+     *   can-101
+     *
+     * 其中：
+     *
+     *   "can-" → 协议前缀
+     *   "101"  → 十六进制CAN ID，即0x101
+     *
+     * 因此收到下行命令后，
+     * 首先需要把业务层device_id重新转换成CAN ID。
+     */
+    const std::string prefix = "can-";
+    if (command.device_id.size() <= prefix.size() || command.device_id.compare(0,prefix.size(),prefix) != 0)
+    {
+        Logger::warn("Invalid CAN device_id: " + command.device_id);
+        return false;
+    }
 
-    return false;
+    /*
+     * 去掉"can-"前缀。
+     *
+     * 例如：
+     *
+     *   "can-101"
+     *
+     *       ↓
+     *
+     *   "101"
+     */
+    const std::string can_id_text =command.device_id.substr(prefix.size());
+    unsigned long parsed_can_id = 0;
+    try
+    {
+        /*
+         * 按16进制解析CAN ID。
+         *
+         * "101"
+         *
+         *   ↓ base = 16
+         *
+         * 0x101
+         */
+        std::size_t parsed_length = 0;
+        parsed_can_id = std::stoul(can_id_text,&parsed_length,16);
+
+        /*
+         * 要求整个字符串都必须是合法的16进制CAN ID。
+         *
+         * 例如：
+         *
+         *   can-101abcxyz
+         *
+         * 不能只成功解析前面的101abc，
+         * 然后忽略后面的非法字符。
+         */
+        if (parsed_length!= can_id_text.size())
+        {
+            Logger::warn("Invalid CAN device_id: "+ command.device_id);
+            return false;
+        }
+    }
+    catch (const std::exception&)
+    {
+        Logger::warn("Invalid CAN device_id: " + command.device_id);
+        return false;
+    }
+
+     /*
+     * 当前第一版只支持标准11位CAN ID。
+     *
+     * 标准帧范围：
+     *
+     *   0x000 ~ 0x7FF
+     *
+     * CAN_SFF_MASK就是：
+     *
+     *   0x7FF
+     */
+    if (parsed_can_id> CAN_SFF_MASK)
+    {
+        Logger::warn("CAN ID exceeds standard 11-bit range: " + command.device_id);
+        return false;
+    }
+
+    /*
+     * 当前测试协议第一版只支持：
+     *
+     *   action = "set_value"
+     *
+     * 后续如果增加：
+     *
+     *   start
+     *   stop
+     *   reset
+     *
+     * 可以继续在CanConnector内部增加
+     * 对应的CAN命令编码规则。
+     */
+    if (command.action != "set_value")
+    {
+        Logger::warn("Unsupported CAN command action: " + command.action);
+        return false;
+    }
+
+    /*
+     * set_value命令必须携带：
+     *
+     * {
+     *     "value": 300
+     * }
+     */
+    if (!command.parameters.contains("value")|| (!command.parameters["value"].is_number_integer()&& !command.parameters["value"].is_number_unsigned()))
+    {
+        Logger::warn(
+            "CAN set_value command requires integer parameter: value"
+        );
+        return false;
+    }
+
+    std::uint64_t value = 0;
+
+    /*
+     * JSON可能保存的是：
+     *
+     * 有符号整数
+     * 或
+     * 无符号整数
+     *
+     * 所以这里分别处理。
+     */
+    if (command.parameters["value"].is_number_unsigned())
+    {
+        value = command.parameters["value"].get<std::uint64_t>();
+    }
+    else
+    {
+        const std::int64_t signed_value = command.parameters["value"].get<std::int64_t>();
+        /*
+         * 当前协议value只允许非负数。
+         */
+        if (signed_value < 0)
+        {
+            Logger::warn(
+                "CAN set_value must not be negative"
+            );
+            return false;
+        }
+
+        value = static_cast<std::uint64_t>(signed_value);
+    }
+
+    /*
+     * 当前协议使用两个字节保存value：
+     *
+     * DATA[1]
+     * DATA[2]
+     *
+     * 因此最大值只能是：
+     *
+     * 0xFFFF = 65535
+     */
+    if (value > 0xFFFF)
+    {
+        Logger::warn("CAN set_value exceeds 16-bit range");
+        return false;
+    }
+
+     /*
+     * 构造经典CAN Frame。
+     */
+    can_frame frame{};
+
+    /*
+     * 目标CAN ID。
+     *
+     * 例如：
+     *
+     *   device_id = "can-101"
+     *
+     *      ↓
+     *
+     *   frame.can_id = 0x101
+     */
+    frame.can_id =static_cast<canid_t>(parsed_can_id);
+
+    /*
+     * 当前命令一共使用3个数据字节：
+     *
+     * DATA[0] = 命令码
+     * DATA[1] = value高8位
+     * DATA[2] = value低8位
+     */
+    frame.can_dlc = 3;
+
+     /*
+     * 0x01约定为set_value命令码。
+     */
+    frame.data[0] = 0x01;
+
+    /*
+     * 将16位value拆成两个8位字节。
+     *
+     * 例如：
+     *
+     * value = 300
+     *       = 0x012C
+     *
+     * DATA[1] = 0x01
+     * DATA[2] = 0x2C
+     */
+    frame.data[1] =static_cast<std::uint8_t>((value >> 8) & 0xFF);
+    frame.data[2] =static_cast<std::uint8_t>(value & 0xFF);
+
+    /*
+     * SocketCAN发送一个经典CAN Frame。
+     *
+     * 和TCP不同：
+     *
+     * 这里不是发送任意长度字节流，
+     * 而是一次写入完整can_frame。
+     */
+    const ssize_t written = write(can_fd_,&frame,sizeof(frame));
+ 
+     /*
+     * 正常情况下应该完整写入一个can_frame。
+     *
+     * 如果返回值不是sizeof(frame)，
+     * 当前命令认为发送失败。
+     */
+    if (written!= static_cast<ssize_t>(sizeof(frame)))
+    {
+        Logger::error("Failed to send CAN command to device: "+ command.device_id);
+        return false;
+    }
+
+    Logger::info("CAN command sent successfully: device_id=" + command.device_id + ", action=" + command.action + ", value=" + std::to_string(value));
+
+    return true;
 }
