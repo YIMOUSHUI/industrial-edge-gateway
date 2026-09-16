@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 /*
  * libmodbus中的上下文类型。
@@ -149,6 +150,21 @@ private:
      *   当前已经创建Modbus TCP上下文。
      */
     modbus_t* context_{nullptr};
+
+    /**
+     * @brief 串行保护libmodbus网络I/O。
+     *
+     * polling_thread_会通过context_执行：
+     * - modbus_connect()
+     * - modbus_read_registers()
+     *
+     * Command Worker会通过sendCommand()执行：
+     * - modbus_write_register()
+     *
+     * 它们共享同一个Modbus TCP连接，
+     * 因此一次只允许一个线程执行完整的Modbus事务。
+     */
+    std::mutex io_mutex_;
 
     /**
      * Connector运行状态。

@@ -113,8 +113,21 @@ void ModbusConnector::pollingLoop()
          * 不会导致整个Gateway退出。
          */
         if (!connected_)
-        {
-            if (modbus_connect(context_)== -1)
+        {   
+            int connect_result = -1;
+            /*
+            * 建立连接同样会修改context_内部的socket状态，
+            * 因此也和读/写操作使用同一把锁。
+            */
+            {
+                std::lock_guard<std::mutex> lock(io_mutex_);
+                if (running_&& context_ != nullptr)
+                {
+                    connect_result =modbus_connect(context_);
+                }
+            }
+
+            if (connect_result== -1)
             {
                 /*
                  * 连接失败：
@@ -123,7 +136,6 @@ void ModbusConnector::pollingLoop()
                  * ModbusConnector保持后台重试。
                  */
                 Logger::warn("Modbus device unavailable: device_id=" + device_id_ + ", target=" + host_ + ":" + std::to_string(port_) + ", error="+ modbus_strerror(errno));
-
 
                 /*
                  * 控制重连频率。
@@ -155,7 +167,24 @@ void ModbusConnector::pollingLoop()
          */
         std::uint16_t registers[3]{};
 
-        const int read_count = modbus_read_registers(context_,0,3,registers);
+        int read_count = -1;
+        /*
+        * polling_thread_和Command Worker共享同一个
+        * libmodbus context_。
+        *
+        * 所以一次完整的读取事务期间，
+        * 不允许sendCommand()同时发送写寄存器请求。
+        */
+        {
+            std::lock_guard<std::mutex> lock(io_mutex_);
+
+            if (running_&& connected_&& context_ != nullptr)
+            {
+                read_count = modbus_read_registers(context_,0,3,registers);
+            }
+        }
+
+
         if (read_count == 3)
         {
             /*
@@ -277,11 +306,15 @@ void ModbusConnector::pollingLoop()
              * 因为后续还需要使用同一个context_
              * 再次调用modbus_connect()进行重连。
              */
-            modbus_close(context_);
-            connected_ = false;
+            {
+                std::lock_guard<std::mutex> lock(io_mutex_);
+                if (context_ != nullptr&& connected_)
+                {
+                    modbus_close(context_);
+                }
+                connected_ = false;
+            }
         }
-
-
         /*
          * 控制正常采集频率。
          *
@@ -291,7 +324,6 @@ void ModbusConnector::pollingLoop()
         std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms_));
     }
 }
-
 
 void ModbusConnector::stop()
 {
@@ -320,26 +352,36 @@ void ModbusConnector::stop()
     }
 
     /*
-     * context_非空表示libmodbus上下文已经创建。
-     */
-    if (context_ != nullptr)
+    * polling_thread_已经退出。
+    *
+    * 这里使用同一把io_mutex_保护context_释放，
+    * 防止Command Worker恰好仍在结束一次sendCommand()。
+    */
     {
+        std::lock_guard<std::mutex> lock(io_mutex_);
         /*
-         * 如果之前已经成功建立TCP连接，
-         * 先关闭底层Modbus连接。
-         */
-        if (connected_)
+        * context_非空表示libmodbus上下文已经创建。
+        */
+        if (context_ != nullptr)
         {
-            modbus_close(context_);
-        }
+            /*
+            * 如果之前已经成功建立TCP连接，
+            * 先关闭底层Modbus连接。
+            */
+            if (connected_)
+            {
+                modbus_close(context_);
+            }
 
-        /*
-         * 释放libmodbus上下文本身。
-         */
-        modbus_free(context_);
-        context_ = nullptr;
+            /*
+            * 释放libmodbus上下文本身。
+            */
+            modbus_free(context_);
+            context_ = nullptr;
+        }
+        connected_ = false;
     }
-    connected_ = false;
+
     Logger::info("ModbusConnector stopped");
 }
 
@@ -365,19 +407,175 @@ std::vector<std::string> ModbusConnector::getOnlineDevices()
 bool ModbusConnector::sendCommand(const DeviceCommand& command)
 {
     /*
-     * Modbus下行还没有进入实现阶段。
+     * 当前一个ModbusConnector对应一台设备。
      *
-     * 后续这里会负责：
+     * 正常情况下CommandRouter已经根据device_id
+     * 找到了正确的Connector。
      *
-     * DeviceCommand
-     *      ↓
-     * 选择目标Holding Register
-     *      ↓
-     * modbus_write_register()
+     * 这里仍然进行一次边界校验，
+     * 防止错误命令被直接交给当前Connector。
      */
-    (void)command;
+    if (command.device_id != device_id_)
+    {
+        Logger::warn("Modbus command device mismatch: "+ command.device_id);
+        return false;
+    }
 
-    Logger::warn("Modbus command sending is not implemented yet");
-    return false;
+    /*
+     * 当前第一版Modbus下行只支持：
+     *
+     * action = "set_speed"
+     *
+     * 它对应模拟PLC中的Holding Register 2。
+     */
+    if (command.action != "set_speed")
+    {
+        Logger::warn("Unsupported Modbus command action: "+ command.action);
+        return false;
+    }
+
+    /*
+     * set_speed必须携带：
+     *
+     * {
+     *     "value": 1200
+     * }
+     */
+    if (!command.parameters.contains("value")|| (!command.parameters["value"].is_number_integer()&& !command.parameters["value"].is_number_unsigned()))
+    {
+        Logger::warn(
+            "Modbus set_speed requires integer parameter: value"
+        );
+
+        return false;
+    }
+
+    std::uint64_t speed = 0;
+
+    /*
+     * JSON中的整数可能被nlohmann/json保存为：
+     *
+     * signed integer
+     * 或
+     * unsigned integer
+     *
+     * 因此这里分别读取。
+     */
+    if (command.parameters["value"].is_number_unsigned())
+    {
+        speed =command.parameters["value"].get<std::uint64_t>();
+    }
+    else
+    {
+        const std::int64_t signed_speed =command.parameters["value"].get<std::int64_t>();
+        /*
+         * 当前转速不接受负值。
+         */
+        if (signed_speed < 0)
+        {
+            Logger::warn(
+                "Modbus set_speed must not be negative"
+            );
+            return false;
+        }
+
+        speed =static_cast<std::uint64_t>(signed_speed);
+    }
+
+    /*
+     * 一个Holding Register为16 bit。
+     *
+     * 当前HR2直接保存转速值，
+     * 因此合法范围：
+     *
+     * 0 ~ 65535
+     */
+    if (speed > 0xFFFF)
+    {
+        Logger::warn("Modbus set_speed exceeds 16-bit range");
+        return false;
+    }
+
+    /*
+     * 当前Connector正在停止，或者PLC离线时，
+     * 不能执行下行写操作。
+     */
+    if (!running_|| !connected_)
+    {
+        Logger::warn(
+            "Cannot send Modbus command: device is offline"
+        );
+        return false;
+    }
+
+    /*
+     * pollingLoop()也会使用同一个context_
+     * 执行读寄存器操作。
+     *
+     * 所以这里必须使用相同的io_mutex_，
+     * 保证整个写寄存器事务不会和读取事务交叉。
+     */
+    std::lock_guard<std::mutex> lock(io_mutex_);
+
+    /*
+     * 获取锁之前，设备可能刚好发生断线。
+     *
+     * 所以进入临界区后再检查一次状态。
+     */
+    if (!running_|| !connected_|| context_ == nullptr)
+    {
+        Logger::warn(
+            "Cannot send Modbus command: connection is unavailable"
+        );
+
+        return false;
+    }
+
+    /*
+     * 写Holding Register 2。
+     *
+     * 当前模拟PLC定义：
+     *
+     * HR0 → temperature
+     * HR1 → humidity
+     * HR2 → speed
+     */
+    const int result = modbus_write_register(context_,2,static_cast<int>(speed));
+    /*
+     * modbus_write_register()成功写一个寄存器时，
+     * 返回1。
+     */
+    if (result != 1)
+    {
+        Logger::warn(
+            "Failed to write Modbus speed register: "
+            + device_id_
+            + ", error="
+            + modbus_strerror(errno)
+        );
+
+        /*
+         * 写操作失败时，这条TCP连接可能已经失效。
+         *
+         * 关闭当前连接并标记离线。
+         *
+         * 后续pollingLoop()发现connected_ == false，
+         * 会自动进入你Phase 5A已经实现好的重连逻辑。
+         */
+        modbus_close(context_);
+        connected_ = false;
+
+        return false;
+    }
+
+    Logger::info(
+        "Modbus command sent successfully: device_id="
+        + device_id_
+        + ", action=set_speed"
+        + ", value="
+        + std::to_string(speed)
+    );
+
+    return true;
 }
 
