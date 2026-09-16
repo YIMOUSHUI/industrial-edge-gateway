@@ -1077,3 +1077,19 @@ bool GatewayContext::isMqttConnected() const
      */
     return mqtt_publisher_->isConnected();
 }
+
+std::size_t GatewayContext::getTelemetryQueueSize()
+{
+    return telemetry_queue_.size();
+}
+
+std::size_t GatewayContext::getTelemetryQueueCapacity() const
+{
+    return telemetry_queue_.capacity();
+}
+
+std::size_t GatewayContext::getDroppedTelemetryCount()
+{
+    return telemetry_queue_.droppedCount();
+}
+

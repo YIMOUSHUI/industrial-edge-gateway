@@ -263,7 +263,7 @@ void ModbusConnector::pollingLoop()
                 message_callback_(message);
             }
 
-            Logger::info(
+            Logger::debug(
                 "Modbus telemetry received: device_id="
                 + device_id_
                 + ", temperature="

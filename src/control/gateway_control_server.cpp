@@ -603,6 +603,19 @@ std::string GatewayControlServer::handleRequest(const std::string& request)
             + std::to_string(devices.size())
             + "\n";
 
+        /*
+        * TelemetryQueue运行状态。
+        *
+        * Queue size：
+        *   当前仍然等待Worker消费的消息数量。
+        *
+        * Dropped telemetry：
+        *   从本次gatewayd启动开始，
+        *   因Queue达到容量上限而被拒绝的遥测总数。
+        */
+        response += "Telemetry queue: " + std::to_string(gateway_.getTelemetryQueueSize()) + "/" + std::to_string(gateway_.getTelemetryQueueCapacity()) + "\n";
+        response += "Dropped telemetry: " + std::to_string(gateway_.getDroppedTelemetryCount()) + "\n";
+
         return response;
     }
 

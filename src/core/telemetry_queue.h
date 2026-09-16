@@ -36,6 +36,31 @@ public:
     explicit TelemetryQueue(std::size_t capacity);//最多1000条TelemetryMessage
 
     bool push(const TelemetryMessage& message);//Producer 调用
+
+    /**
+     * @brief 获取当前Queue中等待处理的TelemetryMessage数量。
+     *
+     * @return 当前队列长度。
+     */
+    std::size_t size();
+
+    /**
+     * @brief 获取TelemetryQueue最大容量。
+     *
+     * 当前GatewayContext配置为1000。
+     */
+    std::size_t capacity() const;
+
+    /**
+     * @brief 获取因为Queue已满而被拒绝的遥测总数。
+     *
+     * 该计数从gatewayd本次启动开始累计。
+     * Queue stop期间拒绝的消息不计入这里，
+     * 因为那属于正常退出流程，不属于系统过载丢包。
+     */
+    std::size_t droppedCount();
+
+
     bool waitAndPop(TelemetryMessage& message);//Consumer 调用
 
 
@@ -71,6 +96,16 @@ public:
 private:
     std::queue<TelemetryMessage> queue_;
     std::size_t capacity_;
+
+    /*
+    * 从本次gatewayd启动开始，
+    * 因TelemetryQueue容量已满而被拒绝的消息总数。
+    *
+    * 它和queue_使用同一把mutex_保护，
+    * 因此不再额外使用atomic。
+    */
+    std::size_t dropped_count_{0};
+
     std::mutex mutex_;
     std::condition_variable condition_;
     bool stopped_ = false;

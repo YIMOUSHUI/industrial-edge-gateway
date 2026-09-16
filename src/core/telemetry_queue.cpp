@@ -19,6 +19,17 @@ bool TelemetryQueue::push(const TelemetryMessage& message)
 
         if(queue_.size() >= capacity_)
         {
+            /*
+            * Queue已经达到容量上限。
+            *
+            * 当前策略不是让生产者无限阻塞，
+            * 而是拒绝新的TelemetryMessage，
+            * 防止内存无限增长最终拖死gatewayd。
+            *
+            * 这里记录一次真实的“过载丢弃”。
+            */
+            ++dropped_count_;
+
             return false;
         }
 
@@ -140,6 +151,42 @@ QueuePopResult TelemetryQueue::waitAndPopFor(TelemetryMessage& message,std::chro
     queue_.pop();
 
     return QueuePopResult::Message;
+}
+
+std::size_t TelemetryQueue::size()
+{
+    /*
+     * queue_同时可能被：
+     *
+     * Connector生产者线程 push()
+     * Telemetry Worker pop()
+     *
+     * 所以读取size也必须加同一把mutex_，
+     * 避免与push/pop同时访问std::queue产生数据竞争。
+     */
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    return queue_.size();
+}
+
+std::size_t TelemetryQueue::capacity() const
+{
+    /*
+     * capacity_在构造完成后不会再修改，
+     * 因此这里可以直接读取。
+     */
+    return capacity_;
+}
+
+std::size_t TelemetryQueue::droppedCount()
+{
+    /*
+     * dropped_count_在push()中会被生产者线程修改，
+     * 所以查询时也使用同一把mutex_。
+     */
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    return dropped_count_;
 }
 
 

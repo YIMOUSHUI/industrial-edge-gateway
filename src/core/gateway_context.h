@@ -5,7 +5,7 @@
 #include <atomic>
 #include <vector>
 #include <string>
-
+#include <cstddef>
 #include "core/telemetry_queue.h"
 #include "core/command_queue.h"
 #include "core/command_router.h"
@@ -44,6 +44,22 @@ public:
      * @return false MQTT未启用、Publisher不存在或当前未连接。
      */
     bool isMqttConnected() const;
+
+    /**
+     * @brief 获取当前TelemetryQueue中的待处理消息数量。
+     */
+    std::size_t getTelemetryQueueSize();
+
+    /**
+     * @brief 获取TelemetryQueue最大容量。
+     */
+    std::size_t getTelemetryQueueCapacity() const;
+
+    /**
+     * @brief 获取本次运行期间因TelemetryQueue满载而丢弃的消息总数。
+     */
+    std::size_t getDroppedTelemetryCount();
+
 
 private:
     /**
