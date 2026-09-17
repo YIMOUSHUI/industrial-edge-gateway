@@ -1,5 +1,0 @@
-/home/dda/linux/industrial-edge-gateway/build-arm/CMakeFiles/gatewayd.dir
-/home/dda/linux/industrial-edge-gateway/build-arm/CMakeFiles/tcp_device_simulator.dir
-/home/dda/linux/industrial-edge-gateway/build-arm/CMakeFiles/gatewayctl.dir
-/home/dda/linux/industrial-edge-gateway/build-arm/CMakeFiles/edit_cache.dir
-/home/dda/linux/industrial-edge-gateway/build-arm/CMakeFiles/rebuild_cache.dir
