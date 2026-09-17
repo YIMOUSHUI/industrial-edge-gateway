@@ -24,20 +24,20 @@
 
 ```mermaid
 flowchart TB
-    Cloud[MQTT Broker / Cloud]
+    Cloud["MQTT Broker / Cloud"]
 
-    subgraph Gateway[Industrial Edge Gateway]
-        MQTT[MQTT Publisher / Subscriber]
-        TQ[TelemetryQueue]
-        CQ[CommandQueue]
-        Router[CommandRouter]
-        DB[(SQLite OfflineStore)]
-        CTRL[GatewayControlServer]
-        WD[WatchdogManager]
+    subgraph Gateway["Industrial Edge Gateway"]
+        MQTT["MQTT Publisher / Subscriber"]
+        TQ["TelemetryQueue"]
+        CQ["CommandQueue"]
+        Router["CommandRouter"]
+        DB[("SQLite OfflineStore")]
+        CTRL["GatewayControlServer"]
+        WD["WatchdogManager"]
 
-        TCP[TcpConnector]
-        CAN[CanConnector]
-        MODBUS[ModbusConnector]
+        TCP["TcpConnector"]
+        CAN["CanConnector"]
+        MODBUS["ModbusConnector"]
 
         TCP --> TQ
         CAN --> TQ
@@ -55,11 +55,11 @@ flowchart TB
     end
 
     Cloud <--> MQTT
-    TCP <--> TCPDEV[TCP Device]
-    CAN <--> CANDEV[CAN Device]
-    MODBUS <--> PLC[Modbus TCP PLC]
-    CLI[gatewayctl] <--> CTRL
-    WD --> HW[/dev/watchdog0]
+    TCP <--> TCPDEV["TCP Device"]
+    CAN <--> CANDEV["CAN Device"]
+    MODBUS <--> PLC["Modbus TCP PLC"]
+    CLI["gatewayctl"] <--> CTRL
+    WD --> HW["/dev/watchdog0"]
 ```
 
 ### Telemetry Path
