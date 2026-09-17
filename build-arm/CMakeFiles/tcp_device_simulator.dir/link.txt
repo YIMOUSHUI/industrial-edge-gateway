@@ -1,0 +1,1 @@
+/home/dda/linux/tool/buildroot-2025.02.17/output/host/bin/arm-buildroot-linux-gnueabihf-g++ -O3 -DNDEBUG CMakeFiles/tcp_device_simulator.dir/tools/tcp_device_simulator.cpp.o -o tcp_device_simulator 

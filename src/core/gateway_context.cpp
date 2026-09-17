@@ -12,6 +12,10 @@
 #include <memory>
 #include <chrono>
 #include <thread>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
 
 namespace
 {
@@ -802,6 +806,35 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
     TelemetryMessage message;
 
     /*
+     * 性能验证代码：
+     *
+     * 只统计modbus-plc-01实时MQTT成功发布的消息。
+     * 不逐条打印性能日志，避免日志I/O本身污染测量结果。
+     *
+     * serialize：
+     *   TelemetryMessage -> JSON
+     *
+     * publish：
+     *   进入MqttPublisher::publish()
+     *   到publish()返回
+     *
+     * total：
+     *   JSON转换 + MQTT publish
+     */
+    constexpr std::size_t kPerfTargetSamples = 600;
+
+    std::vector<double> serialize_latencies_ms;
+    std::vector<double> publish_latencies_ms;
+    std::vector<double> total_latencies_ms;
+
+    serialize_latencies_ms.reserve(kPerfTargetSamples);
+    publish_latencies_ms.reserve(kPerfTargetSamples);
+    total_latencies_ms.reserve(kPerfTargetSamples);
+
+    bool perf_reported = false;
+    auto next_mqtt_reconnect_time = std::chrono::steady_clock::now();
+
+    /*
      * 下一次允许尝试 MQTT 重连的时间点。
      *
      * 该变量只由 Worker 线程访问，因此不需要 mutex 或 atomic。
@@ -810,7 +843,6 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
      * 如果 Gateway 启动时 MQTT 连接失败，
      * Worker 启动后可以立即再检查一次连接状态。
      */
-    auto next_mqtt_reconnect_time = std::chrono::steady_clock::now();
     /*
      * waitAndPop()：
      * - Queue 有数据时，取出一条 TelemetryMessage；
@@ -984,8 +1016,18 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
          *     ...
          *   }
          */
+        /*
+        * 从这里开始计时。
+        *
+        * 注意放在上面的Logger::info()之后，
+        * 因此“Worker received...”日志写文件的时间
+        * 不会被算进本次性能结果。
+        */
+        const auto perf_total_start = std::chrono::steady_clock::now();
+        const auto perf_serialize_start = perf_total_start;
         const std::string payload = TelemetryConverter::toJson(message);
-        
+        const auto perf_serialize_end = std::chrono::steady_clock::now();
+                
         /*
          * Gateway 已经进入停止流程时，
          * 不再尝试新的网络发送。
@@ -1011,14 +1053,109 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
          */
         if (mqtt_publisher_->isConnected())
         {
-            if (mqtt_publisher_->publish(payload))
+            /*
+            * 单独测量MQTT publish调用。
+            *
+            * publish_start：
+            *   即将进入MqttPublisher::publish()
+            *
+            * publish_end：
+            *   publish()已经返回
+            */
+            const auto perf_publish_start = std::chrono::steady_clock::now();
+            const bool publish_ok = mqtt_publisher_->publish(payload);
+            const auto perf_publish_end = std::chrono::steady_clock::now();
+            if (publish_ok)
             {
+                /*
+                * 只统计固定Modbus设备，
+                * 避免Mock/TCP等不同数据源混入结果。
+                */
+                if (!perf_reported && message.device_id == "modbus-plc-01")
+                {
+                    const double serialize_ms =std::chrono::duration<double, std::milli>(perf_serialize_end- perf_serialize_start).count();
+                    const double publish_ms = std::chrono::duration<double, std::milli>(perf_publish_end- perf_publish_start).count();
+                    const double total_ms = std::chrono::duration<double, std::milli>(perf_publish_end - perf_total_start).count();
+
+                    serialize_latencies_ms.push_back(serialize_ms);
+                    publish_latencies_ms.push_back(publish_ms);
+                    total_latencies_ms.push_back(total_ms);
+
+                    /*
+                    * 收集满600条以后只计算一次。
+                    *
+                    * 测试期间不逐条输出性能日志，
+                    * 尽量减少测量本身带来的干扰。
+                    */
+                    if (total_latencies_ms.size()>= kPerfTargetSamples)
+                    {
+                        auto percentile =
+                            [](std::vector<double> values,double p) -> double
+                            {
+                                std::sort(values.begin(),values.end());
+                                const std::size_t index = static_cast<std::size_t>(
+                                        std::ceil(p* static_cast<double>(values.size()))) - 1;
+                                return values[std::min(index,values.size() - 1)];
+                            };
+
+                        auto mean =
+                            [](const std::vector<double>& values)
+                            {
+                                return std::accumulate(values.begin(),values.end(),0.0) / static_cast<double>(values.size());
+                            };
+
+                        Logger::info(
+                            "PERF serialize: samples="+ std::to_string(serialize_latencies_ms.size())
+                            + ", mean="
+                            + std::to_string(mean(serialize_latencies_ms))
+                            + " ms, p50="
+                            + std::to_string(percentile(serialize_latencies_ms,0.50))
+                            + " ms, p95="
+                            + std::to_string(percentile(serialize_latencies_ms,0.95))
+                            + " ms, p99="
+                            + std::to_string(percentile(serialize_latencies_ms,0.99))
+                            + " ms"
+                        );
+
+                        Logger::info(
+                            "PERF mqtt_publish: samples="
+                            + std::to_string(publish_latencies_ms.size())
+                            + ", mean="
+                            + std::to_string(mean(publish_latencies_ms))
+                            + " ms, p50="
+                            + std::to_string(percentile(publish_latencies_ms,0.50))
+                            + " ms, p95="
+                            + std::to_string(percentile(publish_latencies_ms,0.95))
+                            + " ms, p99="
+                            + std::to_string(percentile(publish_latencies_ms,0.99))
+                            + " ms"
+                        );
+
+                        Logger::info(
+                            "PERF total: samples="
+                            + std::to_string(total_latencies_ms.size())
+                            + ", mean="
+                            + std::to_string(mean(total_latencies_ms))
+                            + " ms, p50="
+                            + std::to_string(percentile(total_latencies_ms,0.50))
+                            + " ms, p95="
+                            + std::to_string(percentile(total_latencies_ms,0.95))
+                            + " ms, p99="
+                            + std::to_string(percentile(total_latencies_ms,0.99))
+                            + " ms"
+                        );
+
+                        perf_reported = true;
+                    }
+                }
+
                 Logger::debug(
                     "Telemetry published via MQTT, device="
                     + message.device_id
                     + ", sequence="
                     + std::to_string(message.sequence)
                 );
+
                 continue;
             }
             /*
