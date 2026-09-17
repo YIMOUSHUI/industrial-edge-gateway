@@ -32,8 +32,24 @@ namespace
 
 int main()
 {
-    std::signal(SIGINT,signalHandler);
-    std::signal(SIGTERM,signalHandler);
+    /*
+    * 使用 sigaction 注册退出信号。
+    *
+    * 不设置 SA_RESTART：
+    * Ctrl+C 到来时，让 accept()/recv() 这类阻塞系统调用
+    * 返回 EINTR，而不是自动重新进入阻塞状态。
+    */
+    struct sigaction sa{};
+    sa.sa_handler = signalHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, nullptr) < 0 ||
+        sigaction(SIGTERM, &sa, nullptr) < 0)
+    {
+        std::cerr << "Failed to install signal handler" << std::endl;
+        return 1;
+    }
 
     /*
      * 创建一个Modbus TCP Server上下文。
@@ -47,7 +63,7 @@ int main()
      *
      *   所以开发阶段使用1502。
      */
-    modbus_t* ctx = modbus_new_tcp("127.0.0.1",1502);
+    modbus_t* ctx = modbus_new_tcp("0.0.0.0",1502);
     if (ctx == nullptr)
     {
         std::cerr<< "Failed to create Modbus TCP context"<< std::endl;
@@ -112,7 +128,7 @@ int main()
 
 
     std::cout<< "Modbus device simulator started"<< std::endl;
-    std::cout<< "Listening on 127.0.0.1:1502"<< std::endl;
+    std::cout<< "Listening on 0.0.0.0:1502"<< std::endl;
     std::cout<< "Holding registers:"<< std::endl;
     std::cout<< "  HR0 temperature = "<< mapping->tab_registers[0]<< " (25.0 C)"<< std::endl;
     std::cout<< "  HR1 humidity    = "<< mapping->tab_registers[1]<< " (60.0 %)"<< std::endl;
@@ -126,11 +142,31 @@ int main()
     int client_socket = modbus_tcp_accept(ctx,&server_socket);
     if (client_socket < 0)
     {
-        std::cerr<< "Failed to accept Modbus TCP client"<< std::endl;
+            /*
+        * Ctrl+C 会中断底层 accept()。
+        *
+        * 此时 errno == EINTR，并且 signalHandler()
+        * 已经把 g_running 设置为0。
+        * 这是正常退出，不属于服务器错误。
+        */
+        if (!g_running && errno == EINTR)
+        {
+            close(server_socket);
+            modbus_mapping_free(mapping);
+            modbus_free(ctx);
+
+            std::cout << "Modbus device simulator stopped" << std::endl;
+            return 0;
+        }
+
+        std::cerr
+            << "Failed to accept Modbus TCP client: "
+            << std::strerror(errno)
+            << std::endl;
+
         close(server_socket);
         modbus_mapping_free(mapping);
         modbus_free(ctx);
-
         return 1;
     }
 
@@ -183,6 +219,15 @@ int main()
             continue;
         }
 
+
+        /*
+        * Ctrl+C 中断了底层 recv()/select()。
+        * 这是正常退出，不打印“客户端掉线”。
+        */
+        if (!g_running && errno == EINTR)
+        {
+            break;
+        }
 
         /*
          * modbus_receive()返回-1，

@@ -115,6 +115,68 @@ bool Config::load(const std::string& path)
             }
         }
 
+        /*
+        * Hardware Watchdog配置。
+        *
+        * 配置块不存在时保持WatchdogConfig中的默认值：
+        * enabled = false
+        *
+        * 因此Ubuntu开发环境不会因为缺少/dev/watchdog0而启动失败。
+        */
+        if (root["watchdog"])
+        {
+            const YAML::Node watchdog_node = root["watchdog"];
+
+            if (watchdog_node["enabled"])
+            {
+                data_.watchdog.enabled =watchdog_node["enabled"].as<bool>();
+            }
+            if (watchdog_node["device"])
+            {
+                data_.watchdog.device = watchdog_node["device"].as<std::string>();
+            }
+            if (watchdog_node["timeout_sec"])
+            {
+                data_.watchdog.timeout_sec = watchdog_node["timeout_sec"].as<int>();
+            }
+            if (watchdog_node["feed_interval_sec"])
+            {
+                data_.watchdog.feed_interval_sec =watchdog_node["feed_interval_sec"].as<int>();
+            }
+            if (watchdog_node["health_timeout_sec"])
+            {
+                data_.watchdog.health_timeout_sec =watchdog_node["health_timeout_sec"].as<int>();
+            }
+        }
+
+        /*
+        * 只有真正启用Watchdog时才要求参数合法。
+        */
+        if (data_.watchdog.enabled)
+        {
+            if (data_.watchdog.timeout_sec <= 0|| data_.watchdog.feed_interval_sec <= 0|| data_.watchdog.health_timeout_sec <= 0)
+            {
+                std::cerr
+                    << "[Config] invalid watchdog timeout configuration"
+                    << std::endl;
+
+                return false;
+            }
+
+            /*
+            * 喂狗周期必须小于硬件超时。
+            *
+            * 否则正常运行时都可能来不及喂狗。
+            */
+            if (data_.watchdog.feed_interval_sec>= data_.watchdog.timeout_sec)
+            {
+                std::cerr<< "[Config] watchdog feed_interval_sec must be "
+                "smaller than timeout_sec"
+                << std::endl;
+
+                return false;
+            }
+        }
 
     }
     catch(const YAML::Exception& error)

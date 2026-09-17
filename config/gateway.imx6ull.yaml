@@ -1,0 +1,65 @@
+gateway:
+  id: gateway-01
+
+runtime:
+  worker_threads: 4
+
+logging:
+  level: debug
+
+connectors:
+  # Mock测试设备。
+  # 正式项目功能保留；最终发布时如果不需要可关闭，
+  # 但配置项不能因为板端部署而丢失。
+  - name: simulator
+    type: mock
+    enabled: true
+
+  # TCP工业设备接入。
+  - name: tcp-server
+    type: tcp
+    enabled: true
+    port: 9000
+
+  # SocketCAN。
+  #
+  # Ubuntu使用vcan0；
+  # i.MX6ULL使用真实CAN接口can0。
+  - name: can-bus
+    type: can
+    enabled: false
+    interface: can0
+
+  # Modbus TCP PLC。
+  #
+  # PLC模拟器运行在Ubuntu：
+  # Ubuntu ens33 = 192.168.10.20
+  # i.MX6ULL     = 192.168.10.50
+  - name: plc-01
+    type: modbus
+    enabled: true
+    host: 192.168.10.20
+    port: 1502
+    device_id: modbus-plc-01
+    poll_interval_ms: 1000
+
+mqtt:
+  enabled: true
+
+  # Mosquitto运行在Ubuntu。
+  server_uri: tcp://192.168.10.20:1883
+
+  # 板端使用独立client_id，
+  # 避免和Ubuntu开发版gatewayd互相踢下线。
+  client_id: gateway-imx6ull-01
+
+  topic: gateway/gateway-imx6ull-01/telemetry
+  command_topic: gateway/gateway-imx6ull-01/command
+  qos: 1
+
+watchdog:
+  enabled: true
+  device: /dev/watchdog0
+  timeout_sec: 15
+  feed_interval_sec: 5
+  health_timeout_sec: 60

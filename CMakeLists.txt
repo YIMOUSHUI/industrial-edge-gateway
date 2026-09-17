@@ -12,6 +12,15 @@ find_package(PahoMqttCpp REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(PkgConfig REQUIRED)
 
+# gatewayd在Ubuntu和ARM板端都需要libmodbus，
+# 因此libmodbus不能只在非交叉编译环境中查找。\
+pkg_check_modules(
+    LIBMODBUS
+    REQUIRED
+    IMPORTED_TARGET
+    libmodbus
+)
+
 add_executable(gatewayd
     src/main.cpp
 
@@ -34,8 +43,11 @@ add_executable(gatewayd
 
     src/storage/offline_store.cpp
 
+    src/health/watchdog_manager.cpp
+
     src/common/config.cpp
     src/common/logger.cpp
+    src/common/process_metrics.cpp
 )
 
 add_executable(tcp_device_simulator
@@ -51,12 +63,6 @@ add_executable(gatewayctl
 # 后续ModbusConnector完成以后，
 # 再为Buildroot启用libmodbus并接入gatewayd。
 if(NOT CMAKE_CROSSCOMPILING)
-    pkg_check_modules(
-        LIBMODBUS
-        REQUIRED
-        IMPORTED_TARGET
-        libmodbus
-    )
     add_executable(modbus_device_simulator
         tools/modbus_device_simulator.cpp
     )

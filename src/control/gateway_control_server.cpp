@@ -616,6 +616,49 @@ std::string GatewayControlServer::handleRequest(const std::string& request)
         response += "Telemetry queue: " + std::to_string(gateway_.getTelemetryQueueSize()) + "/" + std::to_string(gateway_.getTelemetryQueueCapacity()) + "\n";
         response += "Dropped telemetry: " + std::to_string(gateway_.getDroppedTelemetryCount()) + "\n";
 
+        /*
+        * 获取gatewayd当前进程资源快照。
+        */
+        const ProcessMetrics process_metrics = gateway_.getProcessMetrics();
+        if (process_metrics.valid)
+        {
+            response += "Process RSS: " + std::to_string(process_metrics.rss_kb) + " KB\n";
+            response += "Open fd: " + std::to_string(process_metrics.open_fd_count) + "\n";
+            response += "Threads: " + std::to_string(process_metrics.thread_count) + "\n";
+        }
+        else
+        {
+            /*
+            * /proc读取异常不应该导致status命令本身失败。
+            */
+            response += "Process metrics: unavailable\n";
+        }
+        response += "Uptime: " + std::to_string(gateway_.getUptimeSeconds()) + " s\n";
+
+        /*
+        * Hardware Watchdog状态。
+        *
+        * Ubuntu开发环境：
+        *   Watchdog: disabled
+        *
+        * i.MX6ULL正常运行：
+        *   Watchdog: feeding
+        *
+        * Gateway核心健康检查失败：
+        *   Watchdog: armed, feeding stopped
+        */
+        if (!gateway_.isWatchdogEnabled())
+        {
+            response += "Watchdog: disabled\n";
+        }
+        else if (gateway_.isWatchdogFeeding())
+        {
+            response += "Watchdog: feeding\n";
+        }
+        else
+        {
+            response += "Watchdog: armed, feeding stopped\n";
+        }
         return response;
     }
 

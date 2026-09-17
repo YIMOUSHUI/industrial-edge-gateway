@@ -6,15 +6,20 @@
 #include <vector>
 #include <string>
 #include <cstddef>
+#include <chrono>
+#include <cstdint>
+
 #include "core/telemetry_queue.h"
 #include "core/command_queue.h"
 #include "core/command_router.h"
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
+#include "common/process_metrics.h"
 #include "mqtt/mqtt_publisher.h"
 #include "storage/offline_store.h"
 #include "control/gateway_control_server.h"
+#include "health/watchdog_manager.h"
 
 class GatewayContext
 {
@@ -59,6 +64,31 @@ public:
      * @brief 获取本次运行期间因TelemetryQueue满载而丢弃的消息总数。
      */
     std::size_t getDroppedTelemetryCount();
+
+    /**
+     * @brief 获取gatewayd当前Linux进程资源快照。
+     *
+     * 数据每次直接从/proc读取，
+     * GatewayContext不维护第二份资源状态。
+     */
+    ProcessMetrics getProcessMetrics() const;
+
+    /**
+     * @brief 获取本次gatewayd成功启动后的运行时间。
+     *
+     * @return 运行秒数。
+     */
+    std::uint64_t getUptimeSeconds() const;
+
+    /**
+     * @brief Watchdog是否在配置中启用。
+     */
+    bool isWatchdogEnabled() const;
+
+    /**
+     * @brief Watchdog当前是否仍在正常喂狗。
+     */
+    bool isWatchdogFeeding() const;
 
 
 private:
@@ -114,6 +144,15 @@ private:
      * 后续由 Worker 的重连逻辑重新建立连接。
      */
     void flushOfflineBatch();
+
+    /**
+     * @brief Watchdog使用的Gateway核心健康判断。
+     *
+     * 注意：
+     * MQTT、PLC、TCP客户端等外部设备离线
+     * 不会直接判定Gateway自身不健康。
+     */
+    bool isCoreHealthyForWatchdog() const;
 
     Config config_;
 
@@ -192,5 +231,58 @@ private:
     * stop()时停止并销毁。
     */
     std::unique_ptr<GatewayControlServer> control_server_;
+
+    /**
+     * @brief gatewayd本次成功启动的时间点。
+     *
+     * 使用steady_clock而不是system_clock，
+     * 因为系统时间即使被NTP校时或人工修改，
+     * 运行时长也不应该突然跳变。
+     */
+    std::chrono::steady_clock::time_point started_at_{};
+
+    /**
+     * @brief Gateway是否已经完成正式启动。
+     *
+     * started_at_只有在启动成功后才具有有效语义。
+     */
+    bool started_{false};
+
+    /**
+     * @brief Telemetry Worker最近一次正常推进的单调时钟时间。
+     *
+     * 单位：milliseconds。
+     */
+    std::atomic<std::int64_t> telemetry_worker_heartbeat_ms_{0};
+
+    /**
+     * @brief Command Worker当前是否正在执行一条设备命令。
+     *
+     * Command Worker空闲并不代表异常，
+     * 所以只监控“执行中的命令是否卡死”。
+     */
+    std::atomic<bool> command_in_progress_{false};
+
+    /**
+     * @brief 当前Command开始执行的时间。
+     *
+     * 只有command_in_progress_ == true时才有意义。
+     */
+    std::atomic<std::int64_t> command_started_ms_{0};
+
+    /**
+     * @brief Gateway核心业务允许不推进的最大时间。
+     *
+     * 来自gateway.yaml watchdog.health_timeout_sec。
+     */
+    int watchdog_health_timeout_sec_{60};
+
+    /**
+     * @brief Linux硬件Watchdog管理器。
+     *
+     * Ubuntu配置enabled=false时保持nullptr。
+     */
+    std::unique_ptr<WatchdogManager> watchdog_manager_;
+
 };
 

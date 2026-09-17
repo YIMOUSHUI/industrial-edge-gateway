@@ -82,6 +82,50 @@ struct MqttConfig
     int qos = 1;
 };
 
+/**
+ * @brief Linux硬件Watchdog配置。
+ *
+ * Ubuntu开发环境默认关闭。
+ * i.MX6ULL部署环境根据实际硬件开启。
+ */
+struct WatchdogConfig
+{
+    /**
+     * @brief 是否启用硬件Watchdog。
+     */
+    bool enabled = false;
+
+    /**
+     * @brief Linux Watchdog设备节点。
+     */
+    std::string device = "/dev/watchdog0";
+
+    /**
+     * @brief 硬件Watchdog超时时间，单位秒。
+     *
+     * 超过该时间没有喂狗时，
+     * 硬件将触发SoC复位。
+     */
+    int timeout_sec = 15;
+
+    /**
+     * @brief 正常状态下的喂狗周期，单位秒。
+     */
+    int feed_interval_sec = 5;
+
+    /**
+     * @brief Gateway核心业务允许停止推进的最长时间。
+     *
+     * 注意：
+     * 它不是硬件Watchdog timeout。
+     *
+     * 例如：
+     * Telemetry Worker超过60秒没有推进，
+     * Gateway才判定自身异常并停止喂狗。
+     */
+    int health_timeout_sec = 60;
+};
+
 struct GatewayConfig
 {
     std::string gateway_id;
@@ -93,6 +137,8 @@ struct GatewayConfig
     std::vector<ConnectorConfig> connectors;//vector方便后续遍历所有配置
 
     MqttConfig mqtt;
+
+    WatchdogConfig watchdog;
 };
 
 class Config

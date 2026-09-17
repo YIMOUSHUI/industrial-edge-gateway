@@ -34,3 +34,10 @@ mqtt:
   topic: gateway/gateway-01/telemetry
   command_topic: gateway/gateway-01/command
   qos: 1
+
+watchdog:
+  enabled: false
+  device: /dev/watchdog0
+  timeout_sec: 15
+  feed_interval_sec: 5
+  health_timeout_sec: 60

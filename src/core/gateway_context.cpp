@@ -8,11 +8,27 @@
 #include "converters/command_converter.h"
 #include "common/logger.h"
 
-
 #include <utility>
 #include <memory>
 #include <chrono>
 #include <thread>
+
+namespace
+{
+
+    /**
+     * @brief 获取steady_clock当前毫秒值。
+     *
+     * 这里只用于比较“经过了多久”，
+     * 不表示真实日期时间。
+     */
+    std::int64_t steadyNowMs()
+    {
+        return
+            std::chrono::duration_cast<std::chrono::milliseconds>
+                (std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+}
 
 bool GatewayContext::start(const std::string& config_path)
 {
@@ -21,6 +37,24 @@ bool GatewayContext::start(const std::string& config_path)
         return false;
     }
     const GatewayConfig& config =config_.data();
+
+    /*
+    * 保存Watchdog核心健康超时阈值。
+    */
+    watchdog_health_timeout_sec_ = config.watchdog.health_timeout_sec;
+
+    /*
+    * 在Worker真正启动以前先给初始心跳。
+    *
+    * 防止Watchdog刚启动时，
+    * 由于Worker还未来得及第一次循环就被误判。
+    */
+    telemetry_worker_heartbeat_ms_.store(steadyNowMs());
+
+    command_in_progress_.store(false);
+
+    command_started_ms_.store(0);
+
 
     Logger::init(config.log_level);
     Logger::info("Gateway starting");
@@ -324,8 +358,76 @@ bool GatewayContext::start(const std::string& config_path)
 
         return false;
     }
-        Logger::info("Gateway started");
-        return true;
+
+    /*
+    * Watchdog最后启动。
+    *
+    * 原因：
+    * 到这里Connector、Telemetry Worker、
+    * Command Worker、Control Server都已经启动完成。
+    *
+    * Watchdog一旦启动，
+    * Gateway才正式承担“持续喂狗”的责任。
+    */
+    if (config.watchdog.enabled)
+    {
+        watchdog_manager_ =
+            std::make_unique<WatchdogManager>(
+                config.watchdog.device,
+                config.watchdog.timeout_sec,
+                config.watchdog.feed_interval_sec,
+
+                /*
+                * WatchdogManager不知道Gateway内部结构。
+                *
+                * 它只通过这个回调询问：
+                *
+                * “Gateway当前是否健康？”
+                */
+                [this]()
+                {
+                    return isCoreHealthyForWatchdog();
+                }
+            );
+
+        if (!watchdog_manager_->start())
+        {
+            Logger::error(
+                "Failed to start hardware watchdog"
+            );
+
+            watchdog_manager_.reset();
+
+            /*
+            * 配置明确要求启用Watchdog，
+            * 但Watchdog无法工作。
+            *
+            * 对正式板端部署来说这是启动失败，
+            * 不能假装系统具备Watchdog保护。
+            */
+            stop();
+
+            return false;
+        }
+    }
+
+    /*
+    * 到这里说明：
+    *
+    * Connector
+    * Telemetry Worker
+    * Command Worker
+    * Control Server
+    *
+    * 已经全部成功启动。
+    *
+    * 从这一刻开始计算Gateway运行时间。
+    */
+    started_at_ = std::chrono::steady_clock::now();
+    started_ = true;
+
+    Logger::info("Gateway started");
+    return true;
 }
 
 /**
@@ -342,6 +444,28 @@ bool GatewayContext::start(const std::string& config_path)
  */
 void GatewayContext::stop()
 {
+    /*
+    * Gateway进入正常关闭流程时，
+    * 第一件事先停止Watchdog。
+    *
+    * 后面的：
+    *
+    * Connector stop
+    * Worker join
+    * SQLite close
+    *
+    * 理论上都可能需要一些时间。
+    *
+    * 如果Watchdog仍然在运行，
+    * 正常shutdown过程中也可能因为没有及时喂狗
+    * 被误认为系统卡死而复位。
+    */
+    if (watchdog_manager_)
+    {
+        watchdog_manager_->stop();
+        watchdog_manager_.reset();
+    }    
+
     /*
     * Control Server必须优先停止。
     *
@@ -427,7 +551,9 @@ void GatewayContext::stop()
     {
         offline_store_->close();
     }
+    started_ = false;
     Logger::info("Gateway stopped");
+
 }
 
 void GatewayContext::handleMessage(const TelemetryMessage& message,IConnector* source_connector)
@@ -702,6 +828,19 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
          */
         const QueuePopResult pop_result =telemetry_queue_.waitAndPopFor(message,std::chrono::milliseconds(1000));
          
+        /*
+        * 能从waitAndPopFor()正常返回，
+        * 说明Telemetry Worker线程仍然能够推进。
+        *
+        * 不管本轮：
+        *
+        * - 收到消息
+        * - 只是1秒超时
+        *
+        * 都属于Worker正常存活。
+        */
+        telemetry_worker_heartbeat_ms_.store(steadyNowMs());
+
         /*
          * Queue 已 stop 且没有剩余消息。
          *
@@ -981,12 +1120,38 @@ void GatewayContext::commandWorkerLoop()
         );
 
         /*
-        * 将已经结构化的DeviceCommand交给CommandRouter。
+        * Command已经真正开始执行。
         *
-        * Router负责根据device_id找到目标Connector，
-        * Connector再决定该协议具体怎样执行命令。
+        * Command Worker平时可能长时间没有命令，
+        * 那属于正常idle状态。
+        *
+        * 所以Watchdog不监控“多久没有命令”，
+        * 只监控“一条命令执行了多久还没返回”。
         */
-        if (!command_router_.dispatch(command))
+        command_started_ms_.store(steadyNowMs());
+
+        command_in_progress_.store(true);
+
+        /*
+        * Command已经真正开始执行。
+        *
+        * Command Worker平时可能长时间没有命令，
+        * 那属于正常idle状态。
+        *
+        * 所以Watchdog不监控“多久没有命令”，
+        * 只监控“一条命令执行了多久还没返回”。
+        */
+        command_started_ms_.store(steadyNowMs());
+        command_in_progress_.store(true);
+        const bool dispatch_ok = command_router_.dispatch(command);
+
+        /*
+        * dispatch()已经正常返回，
+        * 当前Command Worker不再处于执行状态。
+        */
+        command_in_progress_.store(false);
+
+        if (!dispatch_ok)
         {
             Logger::warn(
                 "Command dispatch failed, request_id="
@@ -1093,3 +1258,99 @@ std::size_t GatewayContext::getDroppedTelemetryCount()
     return telemetry_queue_.droppedCount();
 }
 
+ProcessMetrics GatewayContext::getProcessMetrics() const
+{
+    /*
+     * GatewayContext不保存第二份资源统计。
+     *
+     * 每次status查询都直接读取当前Linux进程状态。
+     */
+    return ProcessMetricsReader::read();
+}
+
+std::uint64_t GatewayContext::getUptimeSeconds() const
+{
+    if (!started_)
+    {
+        return 0;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto uptime = std::chrono::duration_cast<std::chrono::seconds> (now - started_at_);
+    return static_cast<std::uint64_t> (uptime.count());
+}
+
+bool GatewayContext::isCoreHealthyForWatchdog() const
+{
+    const std::int64_t now_ms = steadyNowMs();
+    const std::int64_t health_timeout_ms = static_cast<std::int64_t>(watchdog_health_timeout_sec_) * 1000;
+
+    /*
+     * 第一项：
+     * Telemetry Worker必须持续推进。
+     *
+     * 即使没有设备数据，
+     * waitAndPopFor()也会每1秒返回一次Timeout，
+     * 所以正常情况下心跳会持续更新。
+     */
+    const std::int64_t telemetry_heartbeat = telemetry_worker_heartbeat_ms_.load();
+    const std::int64_t telemetry_age = now_ms - telemetry_heartbeat;
+
+    if (telemetry_heartbeat <= 0|| telemetry_age > health_timeout_ms)
+    {
+        Logger::error(
+            "Watchdog health check failed: "
+            "Telemetry Worker stalled for "
+            + std::to_string(telemetry_age)
+            + " ms"
+        );
+
+        return false;
+    }
+
+
+    /*
+     * 第二项：
+     * Command Worker空闲时不要求心跳。
+     *
+     * 只有真正执行DeviceCommand时，
+     * 才检查一次dispatch是否卡住。
+     */
+    if (command_in_progress_.load())
+    {
+        const std::int64_t command_started = command_started_ms_.load();
+        const std::int64_t command_age = now_ms - command_started;
+
+        if (command_started > 0 && command_age > health_timeout_ms)
+        {
+            Logger::error(
+                "Watchdog health check failed: "
+                "Command Worker stalled for "
+                + std::to_string(command_age)
+                + " ms"
+            );
+
+            return false;
+        }
+    }
+
+
+    /*
+     * MQTT断线不检查。
+     * PLC断线不检查。
+     * TCP客户端离线不检查。
+     *
+     * 这些都是外部故障，
+     * Gateway本身仍然能够正常运行和恢复。
+     */
+    return true;
+}
+
+bool GatewayContext::isWatchdogEnabled() const
+{
+    return config_.data().watchdog.enabled;
+}
+
+bool GatewayContext::isWatchdogFeeding() const
+{
+    return watchdog_manager_ && watchdog_manager_->isFeeding();
+}

@@ -4,4 +4,6 @@ build/
 *.a
 *.so
 
-.vscode/
+.vscode/build-arm/
+gateway.db
+*.log

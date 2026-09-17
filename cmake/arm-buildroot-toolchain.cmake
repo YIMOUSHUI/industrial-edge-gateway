@@ -27,3 +27,22 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+# 交叉编译时pkg-config必须读取Buildroot staging中的ARM包信息，
+# 不能读取Ubuntu宿主机的x86_64 .pc文件。
+set(PKG_CONFIG_EXECUTABLE
+    "${BUILDROOT_DIR}/output/host/bin/pkg-config"
+    CACHE FILEPATH
+    "Buildroot pkg-config"
+    FORCE
+)
+
+set(
+    ENV{PKG_CONFIG_SYSROOT_DIR}
+    "${BUILDROOT_DIR}/output/staging"
+)
+
+set(
+    ENV{PKG_CONFIG_LIBDIR}
+    "${BUILDROOT_DIR}/output/staging/usr/lib/pkgconfig:${BUILDROOT_DIR}/output/staging/usr/share/pkgconfig"
+)
