@@ -30,59 +30,31 @@ flowchart TB
         direction TB
 
         MQTT["MQTT Publisher / Subscriber"]
-
-        subgraph Pipeline["Message Processing"]
-            direction LR
-            TQ["TelemetryQueue"]
-            CQ["CommandQueue"]
-            Router["CommandRouter"]
-            DB[("SQLite OfflineStore")]
-        end
+        Core["TelemetryQueue / CommandQueue<br/>CommandRouter / SQLite OfflineStore"]
 
         subgraph Connectors["Protocol Connectors"]
             direction LR
-            TCP["TcpConnector"]
-            CAN["CanConnector"]
-            MODBUS["ModbusConnector"]
+            TCP["TCP Connector"]
+            CAN["SocketCAN Connector"]
+            MODBUS["Modbus TCP Connector"]
         end
 
-        subgraph Runtime["Runtime & Reliability"]
-            direction LR
-            CTRL["GatewayControlServer"]
-            WD["WatchdogManager"]
-        end
+        Runtime["GatewayControlServer / WatchdogManager"]
 
-        TCP --> TQ
-        CAN --> TQ
-        MODBUS --> TQ
-
-        TQ --> MQTT
-        TQ --> DB
-        DB --> MQTT
-
-        MQTT --> CQ
-        CQ --> Router
-
-        Router --> TCP
-        Router --> CAN
-        Router --> MODBUS
+        MQTT --> Core
+        Core --> TCP
+        Core --> CAN
+        Core --> MODBUS
+        Core --> Runtime
     end
 
-    Cloud <--> MQTT
+    Cloud --> MQTT
 
-    subgraph Devices["Southbound Devices"]
-        direction LR
-        TCPDEV["TCP Device"]
-        CANDEV["CAN Device"]
-        PLC["Modbus TCP PLC"]
-    end
+    TCP --> TCPDEV["TCP Device"]
+    CAN --> CANDEV["CAN Device"]
+    MODBUS --> PLC["Modbus TCP PLC"]
 
-    TCP <--> TCPDEV
-    CAN <--> CANDEV
-    MODBUS <--> PLC
-
-    CLI["gatewayctl"] <--> CTRL
-    WD --> HW["/dev/watchdog0"]
+    Runtime --> LOCAL["gatewayctl / watchdog0"]
 ```
 
 ### Telemetry Path
