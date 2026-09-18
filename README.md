@@ -27,17 +27,30 @@ flowchart TB
     Cloud["MQTT Broker / Cloud"]
 
     subgraph Gateway["Industrial Edge Gateway"]
-        MQTT["MQTT Publisher / Subscriber"]
-        TQ["TelemetryQueue"]
-        CQ["CommandQueue"]
-        Router["CommandRouter"]
-        DB[("SQLite OfflineStore")]
-        CTRL["GatewayControlServer"]
-        WD["WatchdogManager"]
+        direction TB
 
-        TCP["TcpConnector"]
-        CAN["CanConnector"]
-        MODBUS["ModbusConnector"]
+        MQTT["MQTT Publisher / Subscriber"]
+
+        subgraph Pipeline["Message Processing"]
+            direction LR
+            TQ["TelemetryQueue"]
+            CQ["CommandQueue"]
+            Router["CommandRouter"]
+            DB[("SQLite OfflineStore")]
+        end
+
+        subgraph Connectors["Protocol Connectors"]
+            direction LR
+            TCP["TcpConnector"]
+            CAN["CanConnector"]
+            MODBUS["ModbusConnector"]
+        end
+
+        subgraph Runtime["Runtime & Reliability"]
+            direction LR
+            CTRL["GatewayControlServer"]
+            WD["WatchdogManager"]
+        end
 
         TCP --> TQ
         CAN --> TQ
@@ -49,15 +62,25 @@ flowchart TB
 
         MQTT --> CQ
         CQ --> Router
+
         Router --> TCP
         Router --> CAN
         Router --> MODBUS
     end
 
     Cloud <--> MQTT
-    TCP <--> TCPDEV["TCP Device"]
-    CAN <--> CANDEV["CAN Device"]
-    MODBUS <--> PLC["Modbus TCP PLC"]
+
+    subgraph Devices["Southbound Devices"]
+        direction LR
+        TCPDEV["TCP Device"]
+        CANDEV["CAN Device"]
+        PLC["Modbus TCP PLC"]
+    end
+
+    TCP <--> TCPDEV
+    CAN <--> CANDEV
+    MODBUS <--> PLC
+
     CLI["gatewayctl"] <--> CTRL
     WD --> HW["/dev/watchdog0"]
 ```
