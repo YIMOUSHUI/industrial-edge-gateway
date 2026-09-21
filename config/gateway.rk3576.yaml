@@ -1,0 +1,60 @@
+gateway:
+  id: gateway-rk3576-01
+
+runtime:
+  worker_threads: 4
+
+logging:
+  level: debug
+
+connectors:
+  # 第一阶段保留Mock，用于确认基础上行链。
+  - name: simulator
+    type: mock
+    enabled: true
+
+  # TCP Server先直接启用。
+  - name: tcp-server
+    type: tcp
+    enabled: true
+    port: 9000
+
+  # RK3576原生CAN0。
+  # 当前使用控制器内部loopback完成无外接收发器验证。
+  - name: can-bus
+    type: can
+    enabled: true
+    interface: can0
+
+  # 第一阶段Modbus模拟器直接运行在RK3576本机。
+  - name: plc-01
+    type: modbus
+    enabled: true
+    host: 127.0.0.1
+    port: 1502
+    device_id: modbus-plc-01
+    poll_interval_ms: 1000
+
+mqtt:
+  enabled: true
+
+  # 第一阶段Broker也先运行在RK3576本机，
+  # 减少网络变量。
+  server_uri: tcp://127.0.0.1:1883
+
+  client_id: gateway-rk3576-01
+
+  topic: gateway/gateway-rk3576-01/telemetry
+  command_topic: gateway/gateway-rk3576-01/command
+
+  qos: 1
+
+watchdog:
+  # 第一轮功能验证先关闭。
+  # 等其他模块全部正常以后再单独打开真实/dev/watchdog0。
+  enabled: true
+
+  device: /dev/watchdog0
+  timeout_sec: 15
+  feed_interval_sec: 5
+  health_timeout_sec: 60

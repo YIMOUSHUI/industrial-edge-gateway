@@ -1,0 +1,32 @@
+[Unit]
+Description=Configure RK3576 CAN0 for Industrial Edge Gateway
+After=local-fs.target
+Before=gatewayd.service
+
+[Service]
+Type=oneshot
+
+# CAN网络接口只有在DOWN状态下才能安全修改位时序参数。
+ExecStart=/usr/sbin/ip link set can0 down
+
+# 当前V1没有外接CAN收发器，因此启用控制器内部loopback。
+#
+# bitrate:
+#   仲裁阶段500 kbit/s
+#
+# dbitrate:
+#   CAN FD数据阶段2 Mbit/s
+#
+# 后续接入真实CANH/CANL收发器时，
+# 将最后的loopback on改为loopback off即可。
+ExecStart=/usr/sbin/ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on loopback on
+
+# 真正启动CAN控制器。
+ExecStart=/usr/sbin/ip link set can0 up
+
+# 服务被显式停止时关闭CAN接口。
+ExecStop=/usr/sbin/ip link set can0 down
+
+# oneshot命令执行完成以后仍然保持active状态，
+# 表示“CAN0配置已经生效”。
+RemainAfterExit=yes

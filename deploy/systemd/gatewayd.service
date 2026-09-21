@@ -1,0 +1,44 @@
+[Unit]
+Description=Industrial Edge Gateway
+Documentation=Industrial Edge Gateway on RK3576
+
+Wants=network-online.target
+
+Requires=gateway-can0.service
+
+After=network-online.target
+After=mosquitto.service
+After=gateway-can0.service
+
+[Service]
+Type=simple
+
+# 当前RK3576开发阶段使用cat用户运行。
+User=cat
+Group=cat
+SupplementaryGroups=gateway-watchdog
+
+# gateway.db、日志以及相对配置路径都以此目录为基准。
+WorkingDirectory=/home/cat/industrial-edge-gateway
+
+ExecStart=/home/cat/industrial-edge-gateway/build-rk3576/gatewayd \
+          /home/cat/industrial-edge-gateway/config/gateway.rk3576.yaml
+
+# SIGTERM正好会进入我们main()已有的优雅退出链：
+# signal handler -> g_running=0 -> gateway.stop()
+KillSignal=SIGTERM
+
+# gatewayd异常退出时由systemd重新拉起。
+Restart=on-failure
+RestartSec=3
+
+# 正常stop最多等待15秒；
+# 如果程序确实无法退出，systemd再进行后续处理。
+TimeoutStopSec=15
+
+# stdout/stderr统一进入journald。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

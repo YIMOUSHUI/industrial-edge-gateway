@@ -1,0 +1,1 @@
+SUBSYSTEM=="watchdog", KERNEL=="watchdog0", GROUP="gateway-watchdog", MODE="0660"
