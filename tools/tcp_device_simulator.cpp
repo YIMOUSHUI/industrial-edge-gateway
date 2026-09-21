@@ -237,10 +237,47 @@ std::string buildTelemetryJson(const std::string& device_id, std::uint64_t seque
 
 int main(int argc, char* argv[])
 {
+    /*
+     * 参数：
+     *
+     * argv[1]：设备ID
+     * argv[2]：Gateway TCP Server IP
+     * argv[3]：Gateway TCP Server端口
+     *
+     * 不提供参数时继续保持原有默认行为，
+     * 方便旧的i.MX6ULL测试环境继续使用。
+     */
     std::string device_id = "sensor-001";
+    std::string gateway_ip = "192.168.10.50";
+    int gateway_port = 9000;
+
     if (argc >= 2)
     {
         device_id = argv[1];
+    }
+
+    if (argc >= 3)
+    {
+        gateway_ip = argv[2];
+    }
+
+    if (argc >= 4)
+    {
+        try
+        {
+            gateway_port = std::stoi(argv[3]);
+        }
+        catch (const std::exception&)
+        {
+            std::cerr << "Invalid gateway port" << std::endl;
+            return 1;
+        }
+
+        if (gateway_port <= 0 || gateway_port > 65535)
+        {
+            std::cerr << "Gateway port out of range" << std::endl;
+            return 1;
+        }
     }
 
     int sockfd =socket(AF_INET, SOCK_STREAM, 0);
@@ -253,9 +290,9 @@ int main(int argc, char* argv[])
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(9000);
+    server_addr.sin_port = htons(static_cast<std::uint16_t>(gateway_port));
 
-    if (inet_pton(AF_INET,"192.168.10.50",&server_addr.sin_addr) != 1)
+    if (inet_pton(AF_INET,gateway_ip.c_str(),&server_addr.sin_addr) != 1)
     {
         std::cerr<< "inet_pton() failed"<< std::endl;
         close(sockfd);

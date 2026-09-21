@@ -11,18 +11,32 @@ void signalHandler(int signal)
     g_running = 0;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
-    std::cout << "Industrial Edge Gateway starting..."<< std::endl;
+    std::cout << "Industrial Edge Gateway starting..." << std::endl;
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
+    /*
+     * 默认仍然使用PC开发环境配置。
+     *
+     * 如果命令行提供第一个参数，
+     * 则使用用户指定的配置文件。
+     *
+     * 示例：
+     *   ./gatewayd config/gateway.rk3576.yaml
+     */
+    const std::string config_path =
+        (argc > 1)
+            ? argv[1]
+            : "config/gateway.yaml";
+
     GatewayContext gateway;
-    
-    if(!gateway.start("config/gateway.yaml"))
-    {   
-        std::cerr<< "Gateway start failed"<< std::endl;
+
+    if (!gateway.start(config_path))
+    {
+        std::cerr << "Gateway start failed" << std::endl;
         return 1;
     }
 
@@ -34,4 +48,3 @@ int main()
     gateway.stop();
     return 0;
 }
-

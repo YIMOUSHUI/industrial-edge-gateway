@@ -70,9 +70,12 @@ bool ModbusConnector::start()
     }
 
     /*
-     * 到这里说明TCP连接已经真正建立成功。
-     */
-    connected_ = true;
+    * modbus_new_tcp()这里只创建libmodbus通信上下文，
+    * 并没有真正建立TCP连接。
+    *
+    * 真正的连接由pollingLoop()中的modbus_connect()负责。
+    */
+    connected_ = false;
     running_ = true;
 
     /*
@@ -103,6 +106,8 @@ bool ModbusConnector::start()
 
 void ModbusConnector::pollingLoop()
 {
+    bool unavailable_logged = false;
+
     while (running_)
     {
         /*
@@ -135,7 +140,20 @@ void ModbusConnector::pollingLoop()
                  * Gateway继续运行，
                  * ModbusConnector保持后台重试。
                  */
-                Logger::warn("Modbus device unavailable: device_id=" + device_id_ + ", target=" + host_ + ":" + std::to_string(port_) + ", error="+ modbus_strerror(errno));
+                if (!unavailable_logged)
+                {
+                     Logger::warn(
+                        "Modbus device unavailable: device_id="
+                        + device_id_
+                        + ", target="
+                        + host_
+                        + ":"
+                        + std::to_string(port_)
+                        + ", error="
+                        + modbus_strerror(errno)
+                    );
+                    unavailable_logged = true;
+                }
 
                 /*
                  * 控制重连频率。
@@ -152,6 +170,7 @@ void ModbusConnector::pollingLoop()
              * 当前PLC正式进入在线状态。
              */
             connected_ = true;
+            unavailable_logged = false;
             Logger::info("Modbus device connected: device_id="+ device_id_+ ", target="+ host_+ ":"+ std::to_string(port_));
         }
 
