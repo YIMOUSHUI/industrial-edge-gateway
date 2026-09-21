@@ -252,37 +252,114 @@ void TcpConnector::ioLoop()
             }
             if(fd == listen_fd_)
             {
-                sockaddr_in client_addr{};
-                socklen_t client_len =sizeof(client_addr);
+                /*
+                * listen_fd_ 是非阻塞 socket。
+                *
+                * 一次 EPOLLIN 不代表只有一个客户端等待建立连接。
+                * 在连接突发到达时，内核 accept queue 中可能已经积压多个连接。
+                *
+                * 因此这里持续 accept，
+                * 直到 accept() 返回 EAGAIN / EWOULDBLOCK，
+                * 表示当前所有已经就绪的连接都已经取完。
+                */
+                while(running_)
+                {   
+                    sockaddr_in client_addr{};
+                    socklen_t client_len = sizeof(client_addr);
 
-                int client_fd = accept(listen_fd_,reinterpret_cast<sockaddr*>(&client_addr),&client_len);
-                if(client_fd < 0)
-                {
-                    if (errno == EAGAIN ||errno == EWOULDBLOCK)//暂时没有新连接
+                    const int client_fd =accept(listen_fd_,reinterpret_cast<sockaddr*>(&client_addr),&client_len);
+                    
+                    if(client_fd < 0)
                     {
+                        /*
+                        * accept() 被信号中断。
+                        *
+                        * EINTR 不表示 listen socket 出错，
+                        * 直接重新执行 accept() 即可。
+                        */
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
+
+                        /*
+                        * 非阻塞 listen socket 当前已经没有
+                        * 其他等待接收的连接。
+                        *
+                        * 这是本轮 accept queue 已经排空的正常结束条件。
+                        */
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            break;
+                        }
+                        /*
+                        * 其他 errno 才属于真正的 accept 异常。
+                        *
+                        * 当前只结束本轮 accept 处理，
+                        * 不直接终止整个 TcpConnector，
+                        * 后续 epoll 仍然可以继续工作。
+                        */
+                        Logger::error(
+                            "TCP accept() failed: "
+                            + std::string(std::strerror(errno))
+                        );
+
+                        break;
+                    }
+
+                    /*
+                    * 新建立的客户端 socket 同样使用非阻塞模式，
+                    * 后续读写全部由 epoll 驱动。
+                    */
+                    const int client_flags = fcntl(client_fd, F_GETFL, 0);
+                    if (client_flags < 0 || fcntl(client_fd,F_SETFL,client_flags | O_NONBLOCK) < 0)
+                    {
+                        Logger::error(
+                            "Failed to set TCP client socket non-blocking, fd="
+                            + std::to_string(client_fd)
+                        );
+
+                        close(client_fd);
                         continue;
                     }
 
-                    Logger::error("accept() failed");
-                    continue;
+                     /*
+                    * 初始只关注：
+                    *
+                    * EPOLLIN：
+                    *   客户端上行数据。
+                    *
+                    * EPOLLRDHUP：
+                    *   对端关闭连接。
+                    *
+                    * EPOLLOUT 仍然由真正存在下行数据时动态开启。
+                    */
+                    epoll_event client_event{};
+                    client_event.events = EPOLLIN | EPOLLRDHUP;
+                    client_event.data.fd = client_fd;
+
+                    if (epoll_ctl(epoll_fd_,EPOLL_CTL_ADD,client_fd,&client_event) < 0)
+                    {
+                        Logger::error(
+                            "Failed to add TCP client to epoll, fd="
+                            + std::to_string(client_fd)
+                        );
+
+                        close(client_fd);
+                        continue;
+                    }
+
+                     /*
+                    * socket 已经成功进入 epoll，
+                    * 此时才正式纳入 TcpConnector 的连接状态表。
+                    */
+                    clients_.emplace(client_fd,ClientState{});
+
+                    Logger::info(
+                        "TCP client connected, fd: "
+                        + std::to_string(client_fd)
+                    );
                 }
-                
-                int client_flags =fcntl(client_fd, F_GETFL, 0);
-                fcntl(client_fd,F_SETFL,client_flags | O_NONBLOCK);
-
-                epoll_event client_event{};
-                client_event.events = EPOLLIN | EPOLLRDHUP;
-                client_event.data.fd = client_fd;
-
-                if(epoll_ctl(epoll_fd_,EPOLL_CTL_ADD,client_fd,&client_event) < 0)
-                {
-                    Logger::error("Failed to add client to epoll");
-                    close(client_fd);
-                    continue;
-                }
-
-                clients_.emplace(client_fd,ClientState{});
-                Logger::info("TCP client connected, fd: "+ std::to_string(client_fd));
 
             }
             else
