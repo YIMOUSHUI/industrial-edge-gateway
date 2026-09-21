@@ -140,8 +140,6 @@ void MqttPublisher::connection_lost(const std::string& cause)
     Logger::warn("MQTT connection lost" + (cause.empty() ? std::string() : ": " + cause));
 }
 
-
-
 bool MqttPublisher::isConnected() const
 {
     return client_

@@ -1266,19 +1266,6 @@ void GatewayContext::commandWorkerLoop()
         * 只监控“一条命令执行了多久还没返回”。
         */
         command_started_ms_.store(steadyNowMs());
-
-        command_in_progress_.store(true);
-
-        /*
-        * Command已经真正开始执行。
-        *
-        * Command Worker平时可能长时间没有命令，
-        * 那属于正常idle状态。
-        *
-        * 所以Watchdog不监控“多久没有命令”，
-        * 只监控“一条命令执行了多久还没返回”。
-        */
-        command_started_ms_.store(steadyNowMs());
         command_in_progress_.store(true);
         const bool dispatch_ok = command_router_.dispatch(command);
 

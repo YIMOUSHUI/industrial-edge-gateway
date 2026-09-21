@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdint>
 
-struct ConnectorConfig
+struct  ConnectorConfig
 {
     std::string name;
     std::string type;
