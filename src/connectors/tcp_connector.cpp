@@ -1061,17 +1061,39 @@ bool TcpConnector::processBuffer(int client_fd)
             message.protocol = "tcp";
 
             /*
-            * 当前既知道：
+            * 一个TCP连接在首次合法Telemetry之后
+            * 就固定绑定一个device_id。
             *
-            * client_fd+message.device_id
-            *
-            * 所以可以建立：
-            *
-            * device_id -> fd
-            *
-            * 的TCP连接身份映射。
+            * 如果后续Telemetry试图改变设备身份，
+            * 不能继续把该Telemetry交给Gateway业务层。
             */
-            registerDeviceConnection(client_fd,message.device_id);
+            if (!registerDeviceConnection(client_fd,message.device_id))
+            {
+                Logger::warn(
+                    "TCP telemetry rejected because device identity is invalid, fd="
+                    + std::to_string(client_fd)
+                    + ", device_id="
+                    + message.device_id
+                );
+                /*
+                * 当前连接已经违反：
+                *
+                * 一个TCP连接 == 一个逻辑设备
+                *
+                * 的协议约束。
+                *
+                * 直接关闭连接，避免后续继续产生身份不确定的数据。
+                */
+                removeClient(client_fd);
+                /*
+                * removeClient()已经删除clients_[client_fd]。
+                *
+                * processBuffer()中的recv_buffer引用此时已经失效，
+                * 所以必须立即返回，
+                * 不能继续处理当前buffer。
+                */
+                return false;
+            }
 
             if (message_callback_)
             {
@@ -1359,53 +1381,90 @@ bool TcpConnector::sendCommand(const DeviceCommand& command)
  * 如果同一device_id通过新的TCP连接重新上线，
  * 则更新device_id -> fd映射，使后续Command指向新连接。
  */
-void TcpConnector::registerDeviceConnection(int client_fd,const std::string& device_id)
+bool TcpConnector::registerDeviceConnection(int client_fd,const std::string& device_id)
 {
+    /*
+     * TCP设备必须具有明确的逻辑设备ID。
+     *
+     * 空device_id不能建立有效的：
+     *
+     * device_id -> client_fd
+     *
+     * 路由关系。
+     */
     if (device_id.empty())
     {
-        return;
+        Logger::warn("TCP telemetry rejected because device_id is empty, fd="+ std::to_string(client_fd));
+        return false;
     }
 
+    /*
+     * client_fd必须仍然属于当前TcpConnector管理的连接。
+    */
     auto client_it = clients_.find(client_fd);
     if (client_it == clients_.end())
     {
-        return;
+        Logger::warn("TCP device registration failed because client no longer exists, fd=" + std::to_string(client_fd));
+        return false;
     }
 
     ClientState& state = client_it->second;
 
     /*
-     * 当前连接已经绑定设备ID。
+     * 当前连接已经绑定过device_id。
      *
-     * 正常情况下同一个TCP连接不能在运行过程中
-     * 突然变成另外一台设备。
+     * 一个TCP连接在整个生命周期内只允许代表一个逻辑设备。
      */
     if (!state.device_id.empty())
     {
-        if (state.device_id != device_id)
+        /*
+         * 后续Telemetry仍然来自原设备：
+         *
+         * 这是正常情况。
+         *
+         * processBuffer()每收到一条Telemetry都会执行到这里，
+         * 所以必须允许相同device_id重复出现。
+         */
+        if (state.device_id == device_id)
         {
-            Logger::warn(
-                "TCP client attempted to change device identity, fd="
-                + std::to_string(client_fd)
-                + ", old_device="
-                + state.device_id
-                + ", new_device="
-                + device_id
-            );
+            return true;
         }
-        return;
+
+         /*
+         * 同一个TCP连接突然声明成另外一个设备。
+         *
+         * 这可能是：
+         *
+         * - 设备协议实现错误；
+         * - 客户端状态异常；
+         * - 身份冒用；
+         * - 上层数据污染。
+         *
+         * 当前设计不允许一个连接动态切换身份。
+         */
+        Logger::warn(
+            "TCP client attempted to change device identity, fd="
+            + std::to_string(client_fd)
+            + ", old_device="
+            + state.device_id
+            + ", new_device="
+            + device_id
+        );
+        
+        return false;
     }
 
     /*
-     * ClientState只由TcpConnector I/O线程操作，
-     * 因此这里不需要额外保护clients_。
+     * 第一次收到合法Telemetry：
+     *
+     * 正式把当前TCP连接绑定到device_id。
      */
     state.device_id = device_id;
 
     {
         /*
-         * device_fds_以后还会由Command Worker读取，
-         * 所以修改它时必须加锁。
+         * device_fds_还会被Command Worker访问，
+         * 因此修改映射时使用mutex保护。
          */
         std::lock_guard<std::mutex> lock(
             device_map_mutex_
@@ -1413,6 +1472,16 @@ void TcpConnector::registerDeviceConnection(int client_fd,const std::string& dev
 
         const auto existing = device_fds_.find(device_id);
 
+        /*
+         * 如果同一个device_id已经通过另外一个fd存在，
+         * 当前暂时沿用V1策略：
+         *
+         * 新连接更新device_id -> fd映射。
+         *
+         * “新旧两个连接同时存活”的生命周期问题
+         * 单独留到下一步处理，
+         * 本轮不混进来。
+         */
         if (existing != device_fds_.end()&& existing->second != client_fd)
         {
             Logger::warn(
@@ -1434,6 +1503,7 @@ void TcpConnector::registerDeviceConnection(int client_fd,const std::string& dev
         + ", fd="
         + std::to_string(client_fd)
     );
+    return true;
 }
 
 /**

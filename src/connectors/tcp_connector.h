@@ -168,8 +168,13 @@ private:
      * @brief 将TCP连接绑定到逻辑设备ID。
      *
      * 在收到该连接第一条合法Telemetry后调用。
+     *
+     * 同一个TCP连接后续只能继续使用第一次绑定的device_id。
+     *
+     * @return true  当前device_id合法，连接身份有效。
+     * @return false device_id为空、连接不存在或发生身份变更。
      */
-    void registerDeviceConnection(int client_fd,const std::string& device_id);
+    bool registerDeviceConnection(int client_fd,const std::string& device_id);
 
     /**
      * @brief 删除TCP连接对应的设备映射。
