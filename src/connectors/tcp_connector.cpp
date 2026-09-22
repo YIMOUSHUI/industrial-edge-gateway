@@ -484,6 +484,10 @@ void TcpConnector::handleClientReadable(int client_fd)
 
             return;
         }
+        if (errno == EINTR)
+        {
+            continue;
+        }
         if (errno == EAGAIN ||errno == EWOULDBLOCK)//非阻塞 socket 暂时没数据了
         {
             return;
