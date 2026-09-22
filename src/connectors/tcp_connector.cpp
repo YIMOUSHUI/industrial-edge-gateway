@@ -233,7 +233,39 @@ void TcpConnector::ioLoop()
 
         if(count < 0)
         {
-            continue;
+            /*
+            * EINTR：
+            *
+            * epoll_wait() 在等待期间被信号中断。
+            *
+            * 这不表示 epoll 实例或网络连接发生故障，
+            * 重新进入下一轮 epoll_wait() 即可。
+            */
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            
+             /*
+            * 其他错误说明 epoll_wait() 本身已经无法正常工作。
+            *
+            * 例如：
+            *   EBADF  - epoll_fd_ 已经不是有效文件描述符；
+            *   EINVAL - epoll fd 或调用参数非法。
+            *
+            * 如果这里仍然 continue，
+            * 下一轮 epoll_wait() 很可能继续立即失败，
+            * 导致 I/O 线程进入错误空转。
+            *
+            * 因此记录明确错误并结束当前 I/O 线程。
+            */
+            Logger::error(
+                "TcpConnector epoll_wait() failed: "
+                + std::string(std::strerror(errno))
+            );
+
+            running_ = false;
+            break;
         }
 
         for(int i=0;i<count;++i)
