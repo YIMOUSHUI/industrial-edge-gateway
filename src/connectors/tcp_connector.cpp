@@ -1260,21 +1260,56 @@ bool TcpConnector::sendCommand(const DeviceCommand& command)
     std::vector<std::uint8_t> frame = buildFrame(payload);
 
     /*
-     * 第三步：
-     *
-     * 将待发送任务交给pending_commands_。
-     *
-     * 注意：
-     *
-     * 当前保存的是device_id，
-     * 而不是提前把client_fd保存进任务。
-     *
-     * 后续I/O线程真正处理任务时，
-     * 会重新查询该设备当前对应的fd，
-     * 防止设备断线重连后使用过期fd。
-     */
+    * 第三步：
+    *
+    * “通知I/O线程”与“发布Command任务”
+    * 必须作为一个一致的生产者操作。
+    *
+    * pending_commands_mutex_在整个过程中保持持有：
+    *
+    *   1. 先确保I/O线程能够被唤醒；
+    *   2. 再把Command放入pending_commands_；
+    *   3. 最后释放mutex。
+    *
+    * 即使I/O线程在write(eventfd)之后立即醒来，
+    * 它进入drainPendingCommands()时也必须取得同一个mutex，
+    * 因此只有等当前Command完成入队后才能真正读取队列。
+    */
     {
         std::lock_guard<std::mutex> lock(pending_commands_mutex_);
+
+        const std::uint64_t wake_signal = 1;
+        ssize_t wake_result = -1;
+        do
+        {
+            wake_result =write(wake_fd_,&wake_signal,sizeof(wake_signal));
+        }
+        while (wake_result < 0 && errno == EINTR);
+
+        if (wake_result < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+        {
+            Logger::error(
+                "Failed to wake TcpConnector I/O thread, request_id="
+                + command.request_id
+                + ", error="
+                + std::string(std::strerror(errno))
+            );
+            /*
+            * 注意：
+            *
+            * 此时Command还没有放入pending_commands_。
+            *
+            * 所以返回false以后，
+            * 不存在“上层认为失败，但Command以后又被发送”
+            * 的状态不一致问题。
+            */
+            return false;
+        }
+        /*
+        * 唤醒条件已经建立。
+        *
+        * 现在才正式发布Command任务。
+        */
         pending_commands_.push(PendingCommandFrame{command.device_id,std::move(frame)});
         //std::move把 frame 内部那块动态数组资源交给 PendingCommandFrame 使用，而不是再完整复制一份。
     }
@@ -1289,8 +1324,7 @@ bool TcpConnector::sendCommand(const DeviceCommand& command)
     * eventfd要求每次write()写入一个uint64_t，
     * 即8字节无符号整数。
     */
-    const std::uint64_t wake_signal = 1;
-    ssize_t wake_result = -1;
+    
     /*
     * pending_commands_已经准备完成。
     *
@@ -1299,23 +1333,7 @@ bool TcpConnector::sendCommand(const DeviceCommand& command)
     * EINTR只表示本次系统调用被信号打断，
     * 所以重新执行write()。
     */
-    do
-    {
-        wake_result =write(wake_fd_,&wake_signal,sizeof(wake_signal));
-    }
-    while (wake_result < 0 && errno == EINTR);
-
-    if (wake_result < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-    {
-        Logger::error(
-            "Failed to wake TcpConnector I/O thread, request_id="
-            + command.request_id
-            + ", error="
-            + std::string(std::strerror(errno))
-        );
-
-        return false;
-    }
+    
 
     Logger::info("TCP command queued: request_id=" + command.request_id + ", device_id=" + command.device_id);
 
