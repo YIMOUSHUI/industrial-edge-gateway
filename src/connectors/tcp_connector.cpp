@@ -170,7 +170,28 @@ void TcpConnector::stop()
     if (wake_fd_ >= 0)
     {
         const std::uint64_t wake_signal = 1;
-        (void)write(wake_fd_,&wake_signal,sizeof(wake_signal));
+        ssize_t wake_result = -1;
+
+        do
+        {
+            wake_result = write(wake_fd_,&wake_signal,sizeof(wake_signal));
+        }
+        while (wake_result < 0 && errno == EINTR);
+        /*
+        * EAGAIN / EWOULDBLOCK：
+        *
+        * eventfd计数器当前已经不可继续增加。
+        * 此时wake_fd_本身已经处于可读状态，
+        * I/O线程仍然能够被epoll唤醒，
+        * 所以不把它视为stop失败。
+        */
+        if (wake_result < 0&& errno != EAGAIN&& errno != EWOULDBLOCK)
+        {
+            Logger::warn(
+                "Failed to wake TcpConnector during stop: "
+                + std::string(std::strerror(errno))
+            );
+        }
     }
 
     if(io_thread_.joinable())
@@ -696,8 +717,13 @@ void TcpConnector::handleWakeup()
      * 所以读取时同样必须准备uint64_t变量。
      */
     std::uint64_t wake_count = 0;
+    ssize_t n = -1;
+    do
+    {
+        n = read(wake_fd_,&wake_count,sizeof(wake_count));
+    }
+    while (n < 0 && errno == EINTR);
 
-    const ssize_t n = read(wake_fd_,&wake_count,sizeof(wake_count));
     if (n < 0)
     {
         /*
@@ -711,7 +737,21 @@ void TcpConnector::handleWakeup()
             return;
         }
 
-        Logger::error("Failed to read TcpConnector wake_fd");
+        Logger::error("Failed to read TcpConnector wake_fd: "+ std::string(std::strerror(errno)));
+        return;
+    }
+
+    /*
+    * 普通eventfd的读取单位固定为uint64_t，也就是8字节。
+    *
+    * 正常情况下read()成功就应该返回sizeof(uint64_t)。
+    */
+    if (n != static_cast<ssize_t>(sizeof(wake_count)))
+    {
+        Logger::error(
+            "Unexpected TcpConnector wake_fd read size: "
+            + std::to_string(n)
+        );
         return;
     }
 
@@ -1250,18 +1290,32 @@ bool TcpConnector::sendCommand(const DeviceCommand& command)
     * 即8字节无符号整数。
     */
     const std::uint64_t wake_signal = 1;
-    const ssize_t wake_result = write(wake_fd_,&wake_signal,sizeof(wake_signal));
+    ssize_t wake_result = -1;
+    /*
+    * pending_commands_已经准备完成。
+    *
+    * 通过eventfd唤醒I/O线程。
+    *
+    * EINTR只表示本次系统调用被信号打断，
+    * 所以重新执行write()。
+    */
+    do
+    {
+        wake_result =write(wake_fd_,&wake_signal,sizeof(wake_signal));
+    }
+    while (wake_result < 0 && errno == EINTR);
+
     if (wake_result < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
     {
         Logger::error(
             "Failed to wake TcpConnector I/O thread, request_id="
             + command.request_id
+            + ", error="
+            + std::string(std::strerror(errno))
         );
 
         return false;
     }
-
-
 
     Logger::info("TCP command queued: request_id=" + command.request_id + ", device_id=" + command.device_id);
 
