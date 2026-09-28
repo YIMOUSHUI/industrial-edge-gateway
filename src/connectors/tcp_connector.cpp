@@ -130,11 +130,28 @@ bool TcpConnector::start()
     event.data.fd = listen_fd_; //只关心监听描述符
     if(epoll_ctl(epoll_fd_,EPOLL_CTL_ADD,listen_fd_,&event) < 0)
     {
-        Logger::error("epoll_ctl() failed");
-        close(epoll_fd_);
-        epoll_fd_ = -1;
-        close(listen_fd_);
-        listen_fd_ = -1;
+        const int error = errno;
+        Logger::error(
+            "Failed to add TCP listen socket to epoll: "
+            + std::string(std::strerror(error))
+        );
+        if (wake_fd_ >= 0)
+        {
+            close(wake_fd_);
+            wake_fd_ = -1;
+        }
+
+        if (epoll_fd_ >= 0)
+        {
+            close(epoll_fd_);
+            epoll_fd_ = -1;
+        }
+
+        if (listen_fd_ >= 0)
+        {
+            close(listen_fd_);
+            listen_fd_ = -1;
+        }
 
         return false;
     }
