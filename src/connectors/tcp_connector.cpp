@@ -28,8 +28,34 @@ bool TcpConnector::start()
         return false;
     }
 
-    int flags = fcntl(listen_fd_,F_GETFL,0);//取得当前 fd 状态
-    fcntl(listen_fd_,F_SETFL,flags | O_NONBLOCK);
+    const int flags = fcntl(listen_fd_,F_GETFL,0);//取得当前 fd 状态
+    if (flags < 0)
+    {
+        const int error = errno;
+        Logger::error(
+            "TcpConnector failed to get listen socket flags: "
+            + std::string(std::strerror(error))
+        );
+
+        close(listen_fd_);
+        listen_fd_ = -1;
+        return false;
+    }
+
+    if(fcntl(listen_fd_,F_SETFL,flags | O_NONBLOCK)<0)
+    {
+        const int error = errno;
+
+        Logger::error(
+            "TcpConnector failed to set listen socket non-blocking: "
+            + std::string(std::strerror(error))
+        );
+
+        close(listen_fd_);
+        listen_fd_ = -1;
+
+        return false;
+    }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
