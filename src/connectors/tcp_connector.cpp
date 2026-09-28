@@ -1461,6 +1461,22 @@ bool TcpConnector::registerDeviceConnection(int client_fd,const std::string& dev
      */
     state.device_id = device_id;
 
+    /*
+    * 如果同一个device_id已经存在其他TCP连接，
+    * 记录旧fd。
+    *
+    * 注意：
+    * 不能在持有device_map_mutex_时直接removeClient(old_fd)。
+    *
+    * 因为removeClient()
+    *   -> unregisterDeviceConnection()
+    *   -> 也需要device_map_mutex_
+    *
+    * 如果在锁内部调用，会产生同一线程重复获取
+    * 非递归mutex的死锁。
+    */
+    int old_client_fd = -1;
+
     {
         /*
          * device_fds_还会被Command Worker访问，
@@ -1484,17 +1500,39 @@ bool TcpConnector::registerDeviceConnection(int client_fd,const std::string& dev
          */
         if (existing != device_fds_.end()&& existing->second != client_fd)
         {
-            Logger::warn(
-                "TCP device reconnected, updating connection: device_id="
-                + device_id
-                + ", old_fd="
-                + std::to_string(existing->second)
-                + ", new_fd="
-                + std::to_string(client_fd)
-            );
+            old_client_fd = existing->second;
         }
 
         device_fds_[device_id] =client_fd;
+    }
+
+    /*
+    * mutex已经释放。
+    *
+    * 如果存在旧连接，
+    * 现在安全地把旧连接从epoll、clients_
+    * 和socket生命周期中移除。
+    */
+    if (old_client_fd >= 0)
+    {
+        Logger::warn("TCP device reconnected, replacing old connection: device_id="
+        + device_id
+        + ", old_fd="
+        + std::to_string(old_client_fd)
+        + ", new_fd="
+        + std::to_string(client_fd)
+        );
+
+        /*
+        * clients_只由TcpConnector I/O线程维护，
+        * 当前函数也运行在该I/O线程中，
+        * 因此这里可以直接检查旧fd是否仍然存在。
+        */
+        if (clients_.find(old_client_fd) != clients_.end())
+        {
+            removeClient(old_client_fd);
+        }
+
     }
 
     Logger::info(
