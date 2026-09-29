@@ -7,6 +7,33 @@ runtime:
 logging:
   level: debug
 
+# 本地边缘规则。
+#
+# 当前演示：
+# Modbus模拟PLC温度固定约25℃。
+#
+# 温度持续超过24℃ 3秒后，
+# Gateway在本地自动把电机转速设置为800 rpm。
+rules:
+  - id: plc-overheat-demo
+    enabled: true
+
+    device_id: modbus-plc-01
+    metric: temperature
+
+    condition:
+      operator: ">"
+      threshold: 24.0
+      duration_ms: 3000
+
+    cooldown_ms: 30000
+
+    actions:
+      - type: device_command
+        action: set_speed
+        parameters:
+          value: 800
+
 connectors:
   # 第一阶段保留Mock，用于确认基础上行链。
   - name: simulator

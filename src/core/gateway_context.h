@@ -12,6 +12,7 @@
 #include "core/telemetry_queue.h"
 #include "core/command_queue.h"
 #include "core/command_router.h"
+#include "rules/rule_engine.h"
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
@@ -80,6 +81,26 @@ public:
      * @brief Uplink Queue最大容量。
      */
     std::size_t getUplinkQueueCapacity() const;
+
+    /**
+     * @brief 当前启用的Rule数量。
+     */
+    std::size_t getEnabledRuleCount() const;
+
+    /**
+     * @brief 已进入Rule Engine的Telemetry数量。
+     */
+    std::uint64_t getRuleMessagesEvaluated() const;
+
+    /**
+     * @brief Rule触发总次数。
+     */
+    std::uint64_t getRuleTriggerCount() const;
+
+    /**
+     * @brief 成功加入CommandQueue的本地规则动作数量。
+     */
+    std::uint64_t getLocalRuleActionCount() const;
 
     /**
      * @brief 获取gatewayd当前Linux进程资源快照。
@@ -325,6 +346,30 @@ private:
      * started_at_只有在启动成功后才具有有效语义。
      */
     bool started_{false};
+
+    /**
+     * @brief 每个Telemetry Processing Worker
+     * 独占一个RuleEngine。
+     *
+     * Device Affinity保证同一个设备始终进入同一个实例，
+     * 因此Rule状态无需跨Worker加锁。
+     */
+    std::vector<std::unique_ptr<RuleEngine>> rule_engines_;
+
+    /**
+     * @brief 经过Rule Engine的Telemetry数量。
+     */
+    std::atomic<std::uint64_t> rule_messages_evaluated_{0};
+
+    /**
+     * @brief Rule实际触发次数。
+     */
+    std::atomic<std::uint64_t> rule_triggers_total_{0};
+
+    /**
+     * @brief Rule产生并成功进入CommandQueue的本地动作数量。
+     */
+    std::atomic<std::uint64_t> local_rule_actions_total_{0};
 
     /**
      * @brief 每个Processing Worker自己的Watchdog心跳。

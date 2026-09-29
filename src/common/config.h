@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <nlohmann/json.hpp>
 
 struct  ConnectorConfig
 {
@@ -126,6 +127,94 @@ struct WatchdogConfig
     int health_timeout_sec = 60;
 };
 
+/**
+ * @brief Rule Engine触发后的动作配置。
+ *
+ * 当前第一版支持：
+ *
+ * type = device_command
+ *
+ * 即通过Gateway已有的CommandQueue / CommandRouter
+ * 执行本地设备控制。
+ */
+struct RuleActionConfig
+{
+    std::string type = "device_command";
+
+    /**
+     * DeviceCommand.action
+     *
+     * 例如：
+     * set_speed
+     * set_value
+     * set_interval
+     */
+    std::string action;
+
+    /**
+     * DeviceCommand.parameters
+     *
+     * 例如：
+     *
+     * {
+     *     "value": 800
+     * }
+     */
+    nlohmann::json parameters = nlohmann::json::object();
+};
+
+
+/**
+ * @brief 单条边缘规则配置。
+ */
+struct RuleConfig
+{
+    bool enabled = true;
+
+    std::string id;
+
+    /**
+     * 当前第一版一条规则绑定一个具体设备。
+     */
+    std::string device_id;
+
+    /**
+     * 需要观察的Telemetry指标。
+     *
+     * 例如：
+     * temperature
+     * vibration
+     * speed
+     */
+    std::string metric;
+
+    /**
+     * 比较运算符：
+     *
+     * >
+     * >=
+     * <
+     * <=
+     * ==
+     * !=
+     */
+    std::string op;
+
+    double threshold = 0.0;
+
+    /**
+     * 条件连续成立多久以后才真正触发。
+     */
+    std::uint32_t duration_ms = 0;
+
+    /**
+     * 两次触发之间的最小冷却时间。
+     */
+    std::uint32_t cooldown_ms = 30000;
+
+    std::vector<RuleActionConfig> actions;
+};
+
 struct GatewayConfig
 {
     std::string gateway_id;
@@ -135,6 +224,11 @@ struct GatewayConfig
     std::string log_level = "info";
 
     std::vector<ConnectorConfig> connectors;//vector方便后续遍历所有配置
+
+    /**
+     * @brief 本地边缘规则。
+     */
+    std::vector<RuleConfig> rules;
 
     MqttConfig mqtt;
 

@@ -66,6 +66,11 @@ bool GatewayContext::start(const std::string& config_path)
     telemetry_worker_threads_.clear();
     telemetry_worker_heartbeats_.clear();
 
+    rule_engines_.clear();
+    rule_messages_evaluated_.store(0);
+    rule_triggers_total_.store(0);
+    local_rule_actions_total_.store(0);
+
     const std::size_t worker_count = static_cast<std::size_t>(config.worker_threads);
 
     /*
@@ -90,6 +95,14 @@ bool GatewayContext::start(const std::string& config_path)
         heartbeat->store(steadyNowMs());
 
         telemetry_worker_heartbeats_.push_back(std::move(heartbeat));
+
+        /*
+        * 每个Processing Worker拥有独立RuleEngine实例。
+        *
+        * Rules配置很小，
+        * 为每个Worker复制一份的成本可以忽略。
+        */
+        rule_engines_.push_back(std::make_unique<RuleEngine>(config.rules));
     }
 
     /*
@@ -896,21 +909,6 @@ void GatewayContext::flushOfflineBatch()
     
 }
 
-/**
- * @brief Gateway 遥测业务 Worker 主循环。
- *
- * Worker 负责：
- * 1. 从 TelemetryQueue 获取新遥测消息；
- * 2. MQTT 在线时直接发布消息；
- * 3. MQTT 离线或发布失败时，将消息持久化到 SQLite；
- * 4. 即使 Queue 暂时没有新消息，也周期性醒来检查 MQTT 状态；
- * 5. MQTT 断开期间最多每 5 秒尝试一次重新连接。
- *
- * 当前阶段只完成 Store-and-Forward 中的 Store：
- * 离线数据能够写入 SQLite。
- *
- * SQLite 历史数据的自动补发将在下一阶段加入。
- */
 void GatewayContext::telemetryWorkerLoop(std::size_t worker_index)
 {
     TelemetryMessage message;
@@ -927,10 +925,7 @@ void GatewayContext::telemetryWorkerLoop(std::size_t worker_index)
          * 当前Worker还能正常从Queue返回，
          * 更新自己的独立Watchdog心跳。
          */
-        telemetry_worker_heartbeats_[worker_index]
-            ->store(
-                steadyNowMs()
-            );
+        telemetry_worker_heartbeats_[worker_index]->store(steadyNowMs());
 
         if (pop_result == QueuePopResult::Stopped)
         {
@@ -952,16 +947,82 @@ void GatewayContext::telemetryWorkerLoop(std::size_t worker_index)
         );
 
         /*
-         * M1阶段Processing Worker先负责JSON序列化。
-         *
-         * 下一阶段：
-         *
-         * RuleEngine
-         * Sliding Window
-         * AnomalyDetector
-         *
-         * 都插在这里，而不是插到MQTT线程里。
-         */
+        * ---------------- Rule Engine ----------------
+        *
+        * Rule Engine运行在Processing Worker阶段。
+        *
+        * 它只做：
+        *
+        * Telemetry
+        *     ↓
+        * Rule evaluation
+        *     ↓
+        * DeviceCommand
+        *
+        * 不直接访问任何Connector。
+        */
+        if (worker_index < rule_engines_.size() && rule_engines_[worker_index])
+        {
+            rule_messages_evaluated_.fetch_add(1,std::memory_order_relaxed);
+
+            std::vector<RuleTrigger> triggers =rule_engines_[worker_index]->evaluate(message);
+            for (const RuleTrigger& trigger :triggers)
+            {
+                rule_triggers_total_.fetch_add(1,std::memory_order_relaxed);
+                Logger::warn("Rule triggered: rule_id="
+                    + trigger.rule_id + ", device="
+                    + trigger.device_id + ", metric="
+                    + trigger.metric + ", value="
+                    + std::to_string(trigger.observed_value) + ", threshold="
+                    + std::to_string(trigger.threshold)
+                );
+
+                /*
+                * 所有本地动作继续复用已有CommandQueue。
+                *
+                * Rule Engine：
+                *   Producer
+                *
+                * Command Worker：
+                *   Consumer
+                */
+                for (const DeviceCommand& command :trigger.commands)
+                {
+                    /*
+                    * Gateway已经进入停止流程时
+                    * 不再产生新的本地控制命令。
+                    */
+                    if (stop_requested_.load())
+                    {
+                        break;
+                    }
+
+                    if (!command_queue_.push(command))
+                    {
+                        Logger::warn(
+                            "Local rule action dropped because "
+                            "command queue is full or stopped, "
+                            "rule_id=" + trigger.rule_id
+                            + ", request_id=" + command.request_id
+                        );
+                        continue;
+                    }
+
+                    local_rule_actions_total_.fetch_add(1,std::memory_order_relaxed);
+
+                    Logger::info(
+                        "Local rule action queued: rule_id="+ trigger.rule_id
+                        + ", request_id="+ command.request_id+ ", device="
+                        + command.device_id + ", action=" + command.action
+                    );
+                }
+            }
+        }
+
+        /*
+        * Rule处理完成以后，
+        * 原Telemetry仍然正常进入MQTT上行。
+        */
         std::string payload = TelemetryConverter::toJson(message);
         ProcessedTelemetry processed{std::move(message),std::move(payload)};
 
@@ -1372,6 +1433,35 @@ std::size_t GatewayContext::getUplinkQueueSize()
 std::size_t GatewayContext::getUplinkQueueCapacity() const
 {
     return uplink_queue_.capacity();
+}
+
+std::size_t GatewayContext::getEnabledRuleCount() const
+{
+    std::size_t count = 0;
+
+    for (const RuleConfig& rule : config_.data().rules)
+    {
+        if (rule.enabled)
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::uint64_t GatewayContext::getRuleMessagesEvaluated() const
+{
+    return rule_messages_evaluated_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t GatewayContext::getRuleTriggerCount() const
+{
+    return rule_triggers_total_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t GatewayContext::getLocalRuleActionCount() const
+{
+    return local_rule_actions_total_.load(std::memory_order_relaxed);
 }
 
 ProcessMetrics GatewayContext::getProcessMetrics() const

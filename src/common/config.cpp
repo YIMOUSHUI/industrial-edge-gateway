@@ -1,7 +1,7 @@
 #include "common/config.h"
 
 #include <iostream>
-
+#include <unordered_set>
 #include <yaml-cpp/yaml.h>
 
 bool Config::load(const std::string& path)
@@ -87,6 +87,193 @@ bool Config::load(const std::string& path)
             }
 
             data_.connectors.push_back(connector);
+        }
+
+        /*
+        * 加载本地Rule Engine配置。
+        *
+        * rules不存在：
+        *   表示当前Gateway没有配置任何本地规则，
+        *   属于合法配置。
+        */
+        data_.rules.clear();
+        if (root["rules"])
+        {
+            if (!root["rules"].IsSequence())
+            {
+                std::cerr<< "[Config] rules must be a YAML sequence"<< std::endl;
+                return false;
+            }
+
+            std::unordered_set<std::string> rule_ids;
+            for (const YAML::Node& node : root["rules"])
+            {
+                RuleConfig rule;
+
+                if (node["enabled"])
+                {
+                    rule.enabled =node["enabled"].as<bool>();
+                }
+                /*
+                * 第一版Rule必须明确：
+                *
+                * id
+                * device_id
+                * metric
+                * condition
+                */
+                if (!node["id"]|| !node["device_id"]|| !node["metric"]|| !node["condition"])
+                {
+                    std::cerr<< "[Config] rule requires "<< "id, device_id, metric and condition"<< std::endl;
+                    return false;
+                }
+                rule.id = node["id"].as<std::string>();
+                rule.device_id = node["device_id"].as<std::string>();
+                rule.metric = node["metric"].as<std::string>();
+
+                if (rule.id.empty()|| rule.device_id.empty()|| rule.metric.empty())
+                {
+                    std::cerr<< "[Config] rule id, device_id and metric "<< "must not be empty"<< std::endl;
+                    return false;
+                }
+
+                /*
+                * Rule ID必须唯一。
+                */
+                if (!rule_ids.insert(rule.id).second)
+                {
+                    std::cerr<< "[Config] duplicate rule id: "<< rule.id<< std::endl;
+                    return false;
+                }
+
+                const YAML::Node condition = node["condition"];
+                if (!condition["operator"]|| !condition["threshold"])
+                {
+                    std::cerr<< "[Config] rule condition requires "<< "operator and threshold: "<< rule.id<< std::endl;
+                    return false;
+                }
+
+                rule.op = condition["operator"].as<std::string>();
+                rule.threshold = condition["threshold"].as<double>();
+                if (rule.op != ">"&& rule.op != ">="&& rule.op != "<"&& rule.op != "<="&& rule.op != "=="&& rule.op != "!=")
+                {
+                    std::cerr<< "[Config] unsupported rule operator: "<< rule.op<< ", rule="<< rule.id<< std::endl;
+                    return false;
+                }
+
+                if (condition["duration_ms"])
+                {
+                    const std::int64_t duration = condition["duration_ms"].as<std::int64_t>();
+                    if (duration < 0)
+                    {
+                        std::cerr<< "[Config] rule duration_ms " << "must not be negative: "<< rule.id<< std::endl;
+                        return false;
+                    }
+
+                    rule.duration_ms = static_cast<std::uint32_t>(duration);
+                }
+
+                if (node["cooldown_ms"])
+                {
+                    const std::int64_t cooldown = node["cooldown_ms"].as<std::int64_t>();
+                    if (cooldown < 0)
+                    {
+                        std::cerr<< "[Config] rule cooldown_ms "<< "must not be negative: "<< rule.id<< std::endl;
+                        return false;
+                    }
+                    rule.cooldown_ms = static_cast<std::uint32_t>(cooldown);
+                }
+
+                /*
+                * 当前第一版action只支持：
+                *
+                * type: device_command
+                *
+                * parameters当前只解析简单标量参数。
+                */
+                if (node["actions"])
+                {
+                    if (!node["actions"].IsSequence())
+                    {
+                        std::cerr<< "[Config] rule actions "<< "must be a sequence: "<< rule.id<< std::endl;
+                        return false;
+                    }
+
+                    for (const YAML::Node& action_node :node["actions"])
+                    {
+                        RuleActionConfig action;
+                        if (action_node["type"])
+                        {
+                            action.type = action_node["type"].as<std::string>();
+                        }
+                        if (action.type != "device_command")
+                        {
+                            std::cerr<< "[Config] unsupported rule action type: "<< action.type<< std::endl;
+                            return false;
+                        }
+                        if (!action_node["action"])
+                        {
+                            std::cerr<< "[Config] device_command action "<< "requires action field: "<< rule.id<< std::endl;
+                            return false;
+                        }
+                        action.action = action_node["action"].as<std::string>();
+                        if (action_node["parameters"])
+                        {
+                            const YAML::Node parameters = action_node["parameters"];
+                            if (!parameters.IsMap())
+                            {
+                                std::cerr << "[Config] rule action parameters "<< "must be an object: "<< rule.id<< std::endl;
+                                return false;
+                            }
+
+                            for (const auto& entry :parameters)
+                            {
+                                const std::string key = entry.first.as<std::string>();
+                                const YAML::Node value = entry.second;
+                                /*
+                                * 当前已有Connector命令主要使用：
+                                *
+                                * value
+                                * interval_ms
+                                *
+                                * 等简单标量参数。
+                                */
+                                try
+                                {
+                                    action.parameters[key] =value.as<std::int64_t>();
+                                    continue;
+                                }
+                                catch (...)
+                                {
+                                }
+
+                                try
+                                {
+                                    action.parameters[key] = value.as<double>();
+                                    continue;
+                                }
+                                catch (...)
+                                {
+                                }
+
+                                try
+                                {
+                                    action.parameters[key] = value.as<bool>();
+                                    continue;
+                                }
+                                catch (...)
+                                {
+                                }
+
+                                action.parameters[key] = value.as<std::string>();
+                            }
+                        }
+
+                        rule.actions.push_back(std::move(action));
+                    }
+                }
+                data_.rules.push_back(std::move(rule));
+            }
         }
 
         if (root["mqtt"])

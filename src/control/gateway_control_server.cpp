@@ -617,6 +617,11 @@ std::string GatewayControlServer::handleRequest(const std::string& request)
         response += "Dropped telemetry: " + std::to_string(gateway_.getDroppedTelemetryCount()) + "\n";
         response +="Telemetry workers: " + std::to_string(gateway_.getTelemetryWorkerCount())+ "\n";
         response +="Uplink queue: "+ std::to_string(gateway_.getUplinkQueueSize())+ "/"+ std::to_string(gateway_.getUplinkQueueCapacity())+ "\n";
+        response +="Rules enabled: "+ std::to_string(gateway_.getEnabledRuleCount())+ "\n";
+        response +="Rule messages evaluated: "+ std::to_string(gateway_.getRuleMessagesEvaluated())+ "\n";
+        response +="Rule triggers: "+ std::to_string(gateway_.getRuleTriggerCount())+ "\n";
+        response +="Local rule actions: "+ std::to_string(gateway_.getLocalRuleActionCount())+ "\n";
+
         /*
         * 获取gatewayd当前进程资源快照。
         */
