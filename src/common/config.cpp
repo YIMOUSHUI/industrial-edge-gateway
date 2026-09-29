@@ -12,6 +12,16 @@ bool Config::load(const std::string& path)
 
         data_.gateway_id = root["gateway"]["id"].as<std::string>();//.as<T>() 转换为相应类型
         data_.worker_threads =root["runtime"]["worker_threads"].as<int>();
+        if (data_.worker_threads <= 0|| data_.worker_threads > 32)
+        {
+            std::cerr
+                << "[Config] runtime.worker_threads must be in [1, 32]"
+                << std::endl;
+
+            return false;
+        }
+
+
         data_.log_level =root["logging"]["level"].as<std::string>();
         
         data_.connectors.clear();

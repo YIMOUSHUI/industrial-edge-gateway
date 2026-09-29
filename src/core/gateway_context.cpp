@@ -12,6 +12,7 @@
 #include <memory>
 #include <chrono>
 #include <thread>
+#include <functional>
 #include <vector>
 #include <algorithm>
 #include <numeric>
@@ -43,17 +44,58 @@ bool GatewayContext::start(const std::string& config_path)
     const GatewayConfig& config =config_.data();
 
     /*
+    * 每次Gateway正式启动时重新清除停止标志。
+    */
+    stop_requested_.store(false);
+
+    /*
     * 保存Watchdog核心健康超时阈值。
     */
     watchdog_health_timeout_sec_ = config.watchdog.health_timeout_sec;
 
     /*
-    * 在Worker真正启动以前先给初始心跳。
+    * 初始化Telemetry Processing Worker Pool。
     *
-    * 防止Watchdog刚启动时，
-    * 由于Worker还未来得及第一次循环就被误判。
+    * 配置：
+    *
+    * runtime.worker_threads
+    *
+    * 决定真正创建多少个Processing Worker。
     */
-    telemetry_worker_heartbeat_ms_.store(steadyNowMs());
+    telemetry_queues_.clear();
+    telemetry_worker_threads_.clear();
+    telemetry_worker_heartbeats_.clear();
+
+    const std::size_t worker_count = static_cast<std::size_t>(config.worker_threads);
+
+    /*
+    * V1的TelemetryQueue总容量是1000。
+    *
+    * Worker Pool之后仍然维持总容量约1000，
+    * 而不是每个Worker各1000导致总缓存偷偷扩大。
+    */
+    const std::size_t base_capacity = kTelemetryQueueCapacity / worker_count;
+    const std::size_t remainder = kTelemetryQueueCapacity % worker_count;
+    for (std::size_t i = 0;i < worker_count;++i)
+    {
+        /*
+        * 如果1000不能整除worker_count，
+        * 把余数分配给前几个Queue。
+        */
+        const std::size_t queue_capacity = base_capacity + (i < remainder ? 1 : 0);
+
+        telemetry_queues_.push_back(std::make_unique<TelemetryQueue>(queue_capacity));
+
+        auto heartbeat =std::make_unique<std::atomic<std::int64_t>>();
+        heartbeat->store(steadyNowMs());
+
+        telemetry_worker_heartbeats_.push_back(std::move(heartbeat));
+    }
+
+    /*
+    * 初始化唯一Uplink Worker心跳。
+    */
+    uplink_worker_heartbeat_ms_.store(steadyNowMs());
 
     command_in_progress_.store(false);
 
@@ -328,7 +370,32 @@ bool GatewayContext::start(const std::string& config_path)
         }
     }
 
-    worker_thread_ = std::thread(&GatewayContext::workerLoop,this);//创建工作者线程
+    /*
+    * 先启动唯一Uplink Worker。
+    *
+    * 它负责：
+    *
+    * MQTT reconnect
+    * Offline replay
+    * MQTT publish
+    * SQLite Store-and-Forward
+    *
+    * Processing Worker不会直接访问这些北向组件。
+    */
+    uplink_worker_thread_ = std::thread(&GatewayContext::uplinkWorkerLoop,this);
+
+    /*
+    * 根据runtime.worker_threads
+    * 创建真正的Telemetry Processing Worker Pool。
+    */
+    telemetry_worker_threads_.reserve(telemetry_queues_.size());
+
+    for (std::size_t worker_index = 0;worker_index < telemetry_queues_.size();++worker_index)
+    {
+        telemetry_worker_threads_.emplace_back(&GatewayContext::telemetryWorkerLoop,this,worker_index);
+    }
+
+    Logger::info("Telemetry processing worker pool started: workers="+ std::to_string(telemetry_worker_threads_.size()));
 
     /*
     * 启动独立的下行Command Worker。
@@ -496,37 +563,55 @@ void GatewayContext::stop()
     }
 
     /*
-    * 通知 Worker：
-    * Gateway 已经进入停止流程。
+    * Gateway进入停止流程。
     *
-    * Worker 后续不会再主动进行 MQTT 网络重连，
-    * 剩余 Queue 消息将优先持久化后退出。
+    * Uplink Worker看到该状态以后，
+    * 不再尝试新的MQTT网络发送。
     */
     stop_requested_.store(true);
 
     /*
-    * 停止 Queue，并唤醒当前可能正在
-    * waitAndPopFor() 中等待消息的 Worker。
+    * 停止所有Telemetry入口Queue。
+    *
+    * 已经在Queue中的Telemetry仍允许被
+    * Processing Worker全部处理完成。
     */
-    telemetry_queue_.stop();
+    for (auto& queue : telemetry_queues_)
+    {
+        queue->stop();
+    }
 
     /*
-    * 停止CommandQueue，
-    * 唤醒可能正在waitAndPop()等待命令的Command Worker。
+    * 下行Command Queue维持原来的停止逻辑。
     */
     command_queue_.stop();
 
     /*
-     * 第五步：等待 Worker 自己正常退出。
-     *
-     * join() 不会强制杀死 Worker，
-     * 它只是等待 workerLoop() 返回。
-     */
-    if (worker_thread_.joinable())
+    * 等待所有Processing Worker退出。
+    *
+    * 此时Uplink Worker仍然保持运行，
+    * 所以Processing Worker能够继续把最后的数据
+    * 交给uplink_queue_。
+    */
+    for (auto& worker : telemetry_worker_threads_)
     {
-        worker_thread_.join();
+        if (worker.joinable())
+        {
+            worker.join();
+        }
     }
-    
+
+    /*
+    * 到这里已经不会再产生新的ProcessedTelemetry。
+    *
+    * 现在才能停止Uplink Queue。
+    */
+    uplink_queue_.stop();
+    if (uplink_worker_thread_.joinable())
+    {
+        uplink_worker_thread_.join();
+    }
+
     /*
     * 等待Command Worker完成剩余命令并正常退出。
     */
@@ -572,12 +657,37 @@ void GatewayContext::handleMessage(const TelemetryMessage& message,IConnector* s
      */
     command_router_.registerDevice(message.device_id,source_connector);
 
-    /*
-     * 原有上行链路保持不变。
-     */
-    if (!telemetry_queue_.push(message)) //“生产者”
+    if (telemetry_queues_.empty())
     {
-        Logger::warn("Telemetry queue is full or stopped");
+        Logger::error(
+            "Telemetry worker queues are not initialized"
+        );
+        return;
+    }
+
+     /*
+     * Device Affinity。
+     *
+     * 同一个device_id通过hash
+     * 永远映射到同一个Processing Worker。
+     *
+     * 这样以后：
+     *
+     * Rule Engine状态
+     * Sliding Window
+     * AI时序特征
+     *
+     * 都能够保持单设备消息顺序。
+     */
+    const std::size_t worker_index = std::hash<std::string>{}(message.device_id) % telemetry_queues_.size();
+    if (!telemetry_queues_[worker_index]->push(message))
+    {
+        Logger::warn(
+            "Telemetry queue is full or stopped, device="
+            + message.device_id
+            + ", worker="
+            + std::to_string(worker_index)
+        );
     }
 }
 
@@ -801,374 +911,237 @@ void GatewayContext::flushOfflineBatch()
  *
  * SQLite 历史数据的自动补发将在下一阶段加入。
  */
-void GatewayContext::workerLoop()//工作者线程 运行函数
+void GatewayContext::telemetryWorkerLoop(std::size_t worker_index)
 {
     TelemetryMessage message;
 
-    /*
-     * 性能验证代码：
-     *
-     * 只统计modbus-plc-01实时MQTT成功发布的消息。
-     * 不逐条打印性能日志，避免日志I/O本身污染测量结果。
-     *
-     * serialize：
-     *   TelemetryMessage -> JSON
-     *
-     * publish：
-     *   进入MqttPublisher::publish()
-     *   到publish()返回
-     *
-     * total：
-     *   JSON转换 + MQTT publish
-     */
-    constexpr std::size_t kPerfTargetSamples = 600;
+    TelemetryQueue& queue = *telemetry_queues_[worker_index];
 
-    std::vector<double> serialize_latencies_ms;
-    std::vector<double> publish_latencies_ms;
-    std::vector<double> total_latencies_ms;
+    Logger::info("Telemetry processing worker started: worker="+ std::to_string(worker_index));
 
-    serialize_latencies_ms.reserve(kPerfTargetSamples);
-    publish_latencies_ms.reserve(kPerfTargetSamples);
-    total_latencies_ms.reserve(kPerfTargetSamples);
-
-    bool perf_reported = false;
-    auto next_mqtt_reconnect_time = std::chrono::steady_clock::now();
-
-    /*
-     * 下一次允许尝试 MQTT 重连的时间点。
-     *
-     * 该变量只由 Worker 线程访问，因此不需要 mutex 或 atomic。
-     *
-     * 初始值设为 now()：
-     * 如果 Gateway 启动时 MQTT 连接失败，
-     * Worker 启动后可以立即再检查一次连接状态。
-     */
-    /*
-     * waitAndPop()：
-     * - Queue 有数据时，取出一条 TelemetryMessage；
-     * - Queue 为空时，Worker 在 condition_variable 上睡眠；
-     * - Queue stop 且没有剩余数据时返回 false，结束循环。
-     */
     while (true)
     {
-        /*
-         * 最多等待 1 秒获取新的 TelemetryMessage。
-         *
-         * 与旧 waitAndPop() 不同：
-         * 即使没有新设备数据，Worker 最多 1 秒也会醒一次，
-         * 从而有机会检查 MQTT 是否需要重连。
-         */
-        const QueuePopResult pop_result =telemetry_queue_.waitAndPopFor(message,std::chrono::milliseconds(1000));
-         
-        /*
-        * 能从waitAndPopFor()正常返回，
-        * 说明Telemetry Worker线程仍然能够推进。
-        *
-        * 不管本轮：
-        *
-        * - 收到消息
-        * - 只是1秒超时
-        *
-        * 都属于Worker正常存活。
-        */
-        telemetry_worker_heartbeat_ms_.store(steadyNowMs());
+        const QueuePopResult pop_result =queue.waitAndPopFor(message,std::chrono::milliseconds(1000));
 
         /*
-         * Queue 已 stop 且没有剩余消息。
-         *
-         * Worker 的所有输入已经处理完成，
-         * 可以结束线程。
+         * 当前Worker还能正常从Queue返回，
+         * 更新自己的独立Watchdog心跳。
          */
+        telemetry_worker_heartbeats_[worker_index]
+            ->store(
+                steadyNowMs()
+            );
+
         if (pop_result == QueuePopResult::Stopped)
         {
             break;
         }
 
+        if (pop_result == QueuePopResult::Timeout)
+        {
+            continue;
+        }
+
+        Logger::debug(
+            "Telemetry processing worker received message: worker="
+            + std::to_string(worker_index)
+            + ", device="
+            + message.device_id
+            + ", sequence="
+            + std::to_string(message.sequence)
+        );
+
         /*
-         * MQTT 功能没有启用时：
+         * M1阶段Processing Worker先负责JSON序列化。
          *
-         * 当前项目不把“主动关闭 MQTT”视为网络故障，
-         * 因此不会把所有消息写入离线数据库。
+         * 下一阶段：
          *
-         * Message：
-         *   跳过 MQTT 发布。
+         * RuleEngine
+         * Sliding Window
+         * AnomalyDetector
          *
-         * Timeout：
-         *   没有消息，也没有 MQTT 维护工作。
+         * 都插在这里，而不是插到MQTT线程里。
+         */
+        std::string payload = TelemetryConverter::toJson(message);
+        ProcessedTelemetry processed{std::move(message),std::move(payload)};
+
+        /*
+         * 将CPU处理后的结果交给唯一Uplink Worker。
+         *
+         * Uplink Queue满时push()会等待，
+         * 从而形成backpressure。
+         */
+        if (!uplink_queue_.push(std::move(processed)))
+        {
+            break;
+        }
+    }
+
+    Logger::info(
+        "Telemetry processing worker stopped: worker="
+        + std::to_string(worker_index)
+    );
+}
+
+void GatewayContext::uplinkWorkerLoop()
+{
+    /*
+     * Uplink Worker每次从uplink_queue_
+     * 取出一条Processing Worker已经处理完成的数据。
+     */
+    ProcessedTelemetry processed;
+
+    /*
+     * 下一次允许尝试MQTT重连的时间点。
+     */
+    auto next_mqtt_reconnect_time = std::chrono::steady_clock::now();
+    Logger::info("Telemetry uplink worker started");
+
+    while (true)
+    {
+        /*
+         * Uplink Worker不再直接消费TelemetryMessage。
+         *
+         * 它消费的是Processing Worker已经处理完成的：
+         *
+         * ProcessedTelemetry
+         */
+        const ProcessedQueuePopResult pop_result = uplink_queue_.waitAndPopFor(processed,std::chrono::milliseconds(1000));
+
+        /*
+         * Uplink Worker独立心跳。
+         */
+        uplink_worker_heartbeat_ms_.store(steadyNowMs());
+
+        /*
+         * Queue已经停止并且已经排空。
+         */
+        if (pop_result == ProcessedQueuePopResult::Stopped)
+        {
+            break;
+        }
+
+        /*
+         * MQTT没有启用。
+         *
+         * 保持原项目语义：
+         * 不因为主动禁用MQTT就把所有消息写入SQLite。
          */
         if (!mqtt_publisher_)
         {
-            if (pop_result == QueuePopResult::Message)
+            if (pop_result == ProcessedQueuePopResult::Message)
             {
                 Logger::debug(
-                    "MQTT publisher is disabled, skip telemetry publish"
+                    "MQTT publisher is disabled, "
+                    "skip telemetry publish"
                 );
             }
             continue;
         }
 
-        /*
-         * Worker 每一轮都可以检查 MQTT 状态。
-         *
-         * 但即使 Worker 每 1 秒甚至更快运行一次，
-         * 也不意味着每次都执行 connect()。
-         *
-         * 只有：
-         * 1. MQTT 当前未连接；
-         * 2. Gateway 没有正在退出；
-         * 3. 已经到达下一次允许重连的时间；
-         *
-         * 才真正尝试连接 Broker。
+         /*
+         * MQTT断线时按原有5秒节奏尝试重连。
          */
         if (!mqtt_publisher_->isConnected()&& !stop_requested_.load())
         {
             const auto now = std::chrono::steady_clock::now();
+
             if (now >= next_mqtt_reconnect_time)
             {
                 Logger::warn(
-                    "MQTT disconnected; attempting to reconnect"
+                    "MQTT disconnected; "
+                    "attempting to reconnect"
                 );
 
                 if (mqtt_publisher_->connect())
                 {
-                    Logger::info(
-                        "MQTT connection restored"
-                    );
+                    Logger::info("MQTT connection restored");
                 }
                 else
                 {
-                     /*
-                     * 本次重连失败。
-                     *
-                     * 不让 Worker sleep 5 秒，
-                     * 只是记录“下一次 5 秒以后再允许 connect”。
-                     *
-                     * 这 5 秒期间 Worker仍然能够继续消费 Queue，
-                     * 并把离线消息写入 SQLite。
-                     */
                     next_mqtt_reconnect_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
                     Logger::warn(
                         "MQTT reconnect failed; "
                         "next attempt in 5 seconds"
                     );
                 }
-
-
             }
-
         }
+
         /*
-        * MQTT 当前已经连接时，
-        * 尝试补发一批 SQLite 历史离线消息。
-        *
-        * 即使本轮 Queue 没有新的设备数据，
-        * waitAndPopFor() 超时醒来后也会运行到这里，
-        * 因此 Broker 恢复以后无需等待设备再次发消息，
-        * 历史数据就能够自动恢复发送。
+        * Broker在线时继续沿用原来的
+        * Offline Store replay。
         */
-        if (mqtt_publisher_->isConnected()&& !stop_requested_.load())
+        if (mqtt_publisher_->isConnected() && !stop_requested_.load())
         {
             flushOfflineBatch();
-
-            /*
-            * flushOfflineBatch() 中如果历史消息 publish 失败，
-            * 会主动 disconnect()。
-            *
-            * 此时重新安排下一次 MQTT 重连时间，
-            * 防止下一轮马上高频执行 connect()。
-            */
-           if (!mqtt_publisher_->isConnected())
+            if (!mqtt_publisher_->isConnected())
             {
-                next_mqtt_reconnect_time =std::chrono::steady_clock::now()+ std::chrono::seconds(5);
+                next_mqtt_reconnect_time =std::chrono::steady_clock::now() + std::chrono::seconds(5);
             }
         }
 
         /*
-         * Timeout 只表示本轮没有新的设备消息。
-         *
-         * MQTT 状态检查已经在上面完成，
-         * 因此本轮可以直接结束，
-         * 回到 while 顶部继续等待。
-        */
-        if (pop_result == QueuePopResult::Timeout)
+         * Timeout只是为了让MQTT维护逻辑周期运行。
+         * 本轮没有真正的Telemetry结果。
+         */
+        if (pop_result == ProcessedQueuePopResult::Timeout)
         {
             continue;
         }
 
         /*
-         * 能运行到这里，说明本轮确实取到了一条新消息。
+         * 到这里才说明真正收到一条
+         * Processing Worker处理完成的数据。
          */
-        Logger::info(
-            "Worker received message from " + message.device_id + ", sequence=" + std::to_string(message.sequence)
+        TelemetryMessage& message = processed.message;
+        
+        const std::string& payload = processed.payload;
+        Logger::debug(
+            "Uplink worker received processed telemetry, device="
+            + message.device_id
+            + ", sequence="
+            + std::to_string(message.sequence)
         );
 
         /*
-         * 将内部统一数据模型转换成 JSON 字符串。
+         * Gateway正在退出：
          *
-         * 输入：
-         *   TelemetryMessage
-         *
-         * 输出示例：
-         *   {
-         *     "device_id": "sensor-001",
-         *     "protocol": "tcp",
-         *     "sequence": 1,
-         *     ...
-         *   }
-         */
-        /*
-        * 从这里开始计时。
-        *
-        * 注意放在上面的Logger::info()之后，
-        * 因此“Worker received...”日志写文件的时间
-        * 不会被算进本次性能结果。
-        */
-        const auto perf_total_start = std::chrono::steady_clock::now();
-        const auto perf_serialize_start = perf_total_start;
-        const std::string payload = TelemetryConverter::toJson(message);
-        const auto perf_serialize_end = std::chrono::steady_clock::now();
-                
-        /*
-         * Gateway 已经进入停止流程时，
-         * 不再尝试新的网络发送。
-         *
-         * 当前 Queue 中已经存在的剩余消息
-         * 直接持久化到 SQLite，
-         * 防止进程退出导致内存数据丢失。
+         * 不再进行新的MQTT网络发送，
+         * 将剩余消息保存到SQLite。
          */
         if (stop_requested_.load())
         {
             if (!offline_store_->save(message.device_id,payload,message.timestamp_ms))
             {
-                Logger::error(
-                    "Failed to persist telemetry during shutdown, device="
-                    + message.device_id
-                );
+                Logger::error("Failed to persist telemetry during shutdown, device="+ message.device_id);
             }
             continue;
         }
-
         /*
-         * MQTT 在线时优先直接发布实时消息。
+         * MQTT在线：
+         * 优先发布实时Telemetry。
          */
         if (mqtt_publisher_->isConnected())
         {
-            /*
-            * 单独测量MQTT publish调用。
-            *
-            * publish_start：
-            *   即将进入MqttPublisher::publish()
-            *
-            * publish_end：
-            *   publish()已经返回
-            */
-            const auto perf_publish_start = std::chrono::steady_clock::now();
-            const bool publish_ok = mqtt_publisher_->publish(payload);
-            const auto perf_publish_end = std::chrono::steady_clock::now();
-            if (publish_ok)
+            if (mqtt_publisher_->publish(payload))
             {
-                /*
-                * 只统计固定Modbus设备，
-                * 避免Mock/TCP等不同数据源混入结果。
-                */
-                if (!perf_reported && message.device_id == "modbus-plc-01")
-                {
-                    const double serialize_ms =std::chrono::duration<double, std::milli>(perf_serialize_end- perf_serialize_start).count();
-                    const double publish_ms = std::chrono::duration<double, std::milli>(perf_publish_end- perf_publish_start).count();
-                    const double total_ms = std::chrono::duration<double, std::milli>(perf_publish_end - perf_total_start).count();
-
-                    serialize_latencies_ms.push_back(serialize_ms);
-                    publish_latencies_ms.push_back(publish_ms);
-                    total_latencies_ms.push_back(total_ms);
-
-                    /*
-                    * 收集满600条以后只计算一次。
-                    *
-                    * 测试期间不逐条输出性能日志，
-                    * 尽量减少测量本身带来的干扰。
-                    */
-                    if (total_latencies_ms.size()>= kPerfTargetSamples)
-                    {
-                        auto percentile =
-                            [](std::vector<double> values,double p) -> double
-                            {
-                                std::sort(values.begin(),values.end());
-                                const std::size_t index = static_cast<std::size_t>(
-                                        std::ceil(p* static_cast<double>(values.size()))) - 1;
-                                return values[std::min(index,values.size() - 1)];
-                            };
-
-                        auto mean =
-                            [](const std::vector<double>& values)
-                            {
-                                return std::accumulate(values.begin(),values.end(),0.0) / static_cast<double>(values.size());
-                            };
-
-                        Logger::info(
-                            "PERF serialize: samples="+ std::to_string(serialize_latencies_ms.size())
-                            + ", mean="
-                            + std::to_string(mean(serialize_latencies_ms))
-                            + " ms, p50="
-                            + std::to_string(percentile(serialize_latencies_ms,0.50))
-                            + " ms, p95="
-                            + std::to_string(percentile(serialize_latencies_ms,0.95))
-                            + " ms, p99="
-                            + std::to_string(percentile(serialize_latencies_ms,0.99))
-                            + " ms"
-                        );
-
-                        Logger::info(
-                            "PERF mqtt_publish: samples="
-                            + std::to_string(publish_latencies_ms.size())
-                            + ", mean="
-                            + std::to_string(mean(publish_latencies_ms))
-                            + " ms, p50="
-                            + std::to_string(percentile(publish_latencies_ms,0.50))
-                            + " ms, p95="
-                            + std::to_string(percentile(publish_latencies_ms,0.95))
-                            + " ms, p99="
-                            + std::to_string(percentile(publish_latencies_ms,0.99))
-                            + " ms"
-                        );
-
-                        Logger::info(
-                            "PERF total: samples="
-                            + std::to_string(total_latencies_ms.size())
-                            + ", mean="
-                            + std::to_string(mean(total_latencies_ms))
-                            + " ms, p50="
-                            + std::to_string(percentile(total_latencies_ms,0.50))
-                            + " ms, p95="
-                            + std::to_string(percentile(total_latencies_ms,0.95))
-                            + " ms, p99="
-                            + std::to_string(percentile(total_latencies_ms,0.99))
-                            + " ms"
-                        );
-
-                        perf_reported = true;
-                    }
-                }
-
                 Logger::debug(
                     "Telemetry published via MQTT, device="
                     + message.device_id
                     + ", sequence="
                     + std::to_string(message.sequence)
                 );
-
                 continue;
             }
             /*
-             * isConnected() 刚才虽然为 true，
-             * 但 publish() 仍可能因为网络在此刻异常而失败。
+             * publish过程中网络可能刚好异常。
              *
-             * 当前消息不能丢，因此下面仍会保存到 SQLite。
-             *
-             * 同时将下一次重连安排在 5 秒以后，
-             * 防止后续循环立即高频重连。
+             * 当前消息后面仍然进入SQLite。
              */
             Logger::warn(
-                "MQTT publish failed; storing telemetry offline"
+                "MQTT publish failed; "
+                "storing telemetry offline"
             );
 
             mqtt_publisher_->disconnect();
@@ -1177,29 +1150,18 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
         else
         {
             Logger::warn(
-                "MQTT unavailable; storing telemetry offline"
+                "MQTT unavailable; "
+                "storing telemetry offline"
             );
         }
 
         /*
-         * MQTT 当前不可用，或者刚才 publish 失败。
-         *
-         * 把已经转换好的 MQTT JSON Payload
-         * 持久化到 SQLite。
-         *
-         * 保存完成后不阻塞当前消息，
-         * Worker 下一轮继续消费 TelemetryQueue。
+         * MQTT当前不可用，
+         * 使用原有SQLite Store-and-Forward。
          */
         if (!offline_store_->save(message.device_id,payload,message.timestamp_ms))
         {
-            /*
-             * 当前阶段 SQLite 是最后一道持久化保障。
-             *
-             * 如果 save() 也失败，
-             * 当前消息无法安全保留，因此必须明确记录错误。
-             */
-            Logger::error(
-                "Failed to persist offline telemetry, device="
+            Logger::error("Failed to persist offline telemetry, device="
                 + message.device_id
                 + ", sequence="
                 + std::to_string(message.sequence)
@@ -1207,15 +1169,14 @@ void GatewayContext::workerLoop()//工作者线程 运行函数
         }
         else
         {
-            Logger::info(
-                "Telemetry stored offline, device="
+            Logger::info("Telemetry stored offline, device="
                 + message.device_id
                 + ", sequence="
                 + std::to_string(message.sequence)
             );
         }
     }
-    Logger::info("Telemetry worker stopped");
+    Logger::info("Telemetry uplink worker stopped");
 }
    
 /**
@@ -1369,17 +1330,48 @@ bool GatewayContext::isMqttConnected() const
 
 std::size_t GatewayContext::getTelemetryQueueSize()
 {
-    return telemetry_queue_.size();
+    std::size_t total = 0;
+    for (const auto& queue : telemetry_queues_)
+    {
+        total += queue->size();
+    }
+    return total;
 }
 
 std::size_t GatewayContext::getTelemetryQueueCapacity() const
 {
-    return telemetry_queue_.capacity();
+    std::size_t total = 0;
+    for (const auto& queue : telemetry_queues_)
+    {
+        total += queue->capacity();
+    }
+    return total;
 }
 
 std::size_t GatewayContext::getDroppedTelemetryCount()
 {
-    return telemetry_queue_.droppedCount();
+    std::size_t total = 0;
+    for (const auto& queue : telemetry_queues_)
+    {
+        total += queue->droppedCount();
+    }
+
+    return total;
+}
+
+std::size_t GatewayContext::getTelemetryWorkerCount() const
+{
+    return telemetry_worker_threads_.size();
+}
+
+std::size_t GatewayContext::getUplinkQueueSize()
+{
+    return uplink_queue_.size();
+}
+
+std::size_t GatewayContext::getUplinkQueueCapacity() const
+{
+    return uplink_queue_.capacity();
 }
 
 ProcessMetrics GatewayContext::getProcessMetrics() const
@@ -1409,28 +1401,47 @@ bool GatewayContext::isCoreHealthyForWatchdog() const
     const std::int64_t health_timeout_ms = static_cast<std::int64_t>(watchdog_health_timeout_sec_) * 1000;
 
     /*
-     * 第一项：
-     * Telemetry Worker必须持续推进。
-     *
-     * 即使没有设备数据，
-     * waitAndPopFor()也会每1秒返回一次Timeout，
-     * 所以正常情况下心跳会持续更新。
-     */
-    const std::int64_t telemetry_heartbeat = telemetry_worker_heartbeat_ms_.load();
-    const std::int64_t telemetry_age = now_ms - telemetry_heartbeat;
+    * 检查每一个Telemetry Processing Worker。
+    *
+    * 不能再用一份公共heartbeat，
+    * 否则3个Worker正常、1个Worker卡死时，
+    * Watchdog无法发现问题。
+    */
+    for (std::size_t worker_index = 0;worker_index < telemetry_worker_heartbeats_.size();++worker_index)
+    {
+        const std::int64_t heartbeat = telemetry_worker_heartbeats_[worker_index]->load();
+        const std::int64_t age = now_ms - heartbeat;
 
-    if (telemetry_heartbeat <= 0|| telemetry_age > health_timeout_ms)
+        if (heartbeat <= 0 || age > health_timeout_ms)
+        {
+            Logger::error(
+                "Watchdog health check failed: "
+                "Telemetry Processing Worker "
+                + std::to_string(worker_index)
+                + " stalled for "
+                + std::to_string(age)
+                + " ms"
+            );
+            return false;
+        }
+    }
+
+    /*
+    * 独立检查Uplink Worker。
+    */
+    const std::int64_t uplink_heartbeat = uplink_worker_heartbeat_ms_.load();
+    const std::int64_t uplink_age = now_ms - uplink_heartbeat;
+    if (uplink_heartbeat <= 0|| uplink_age > health_timeout_ms)
     {
         Logger::error(
             "Watchdog health check failed: "
-            "Telemetry Worker stalled for "
-            + std::to_string(telemetry_age)
+            "Telemetry Uplink Worker stalled for "
+            + std::to_string(uplink_age)
             + " ms"
         );
 
         return false;
     }
-
 
     /*
      * 第二项：

@@ -28,6 +28,7 @@ add_executable(gatewayd
 
     src/core/gateway_context.cpp
     src/core/telemetry_queue.cpp
+    src/core/processed_telemetry_queue.cpp
     src/core/command_queue.cpp
     src/core/command_router.cpp
 

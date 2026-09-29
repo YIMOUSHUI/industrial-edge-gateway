@@ -20,6 +20,7 @@
 #include "storage/offline_store.h"
 #include "control/gateway_control_server.h"
 #include "health/watchdog_manager.h"
+#include "core/processed_telemetry_queue.h"
 
 class GatewayContext
 {
@@ -64,6 +65,21 @@ public:
      * @brief 获取本次运行期间因TelemetryQueue满载而丢弃的消息总数。
      */
     std::size_t getDroppedTelemetryCount();
+
+    /**
+     * @brief 当前Telemetry Processing Worker数量。
+     */
+    std::size_t getTelemetryWorkerCount() const;
+
+    /**
+     * @brief 当前等待Uplink Worker处理的数据数量。
+     */
+    std::size_t getUplinkQueueSize();
+
+    /**
+     * @brief Uplink Queue最大容量。
+     */
+    std::size_t getUplinkQueueCapacity() const;
 
     /**
      * @brief 获取gatewayd当前Linux进程资源快照。
@@ -114,7 +130,35 @@ private:
      */
     void handleCommandPayload(const std::string& topic,const std::string& payload);
 
-    void workerLoop();
+    /**
+     * @brief Telemetry Processing Worker。
+     *
+     * 每个Worker只负责：
+     *
+     * TelemetryMessage
+     *      ↓
+     * CPU侧处理
+     *      ↓
+     * JSON Serialization
+     *      ↓
+     * ProcessedTelemetry
+     *
+     * MQTT / SQLite不在这里执行。
+     */
+    void telemetryWorkerLoop(std::size_t worker_index);
+
+    /**
+     * @brief 北向Uplink Worker。
+     *
+     * 独占处理：
+     *
+     * MQTT reconnect
+     * MQTT publish
+     * SQLite Store-and-Forward
+     * Offline Replay
+     */
+    void uplinkWorkerLoop();
+
     /**
      * @brief Command Worker线程入口。
      *
@@ -158,7 +202,41 @@ private:
 
     std::vector<std::unique_ptr<IConnector>> connectors_;
 
-    TelemetryQueue telemetry_queue_{1000};
+    /**
+     * @brief 所有Telemetry入口Queue的总容量。
+     *
+     * worker_threads=4时：
+     *
+     * 1000 / 4 = 每个Worker约250条。
+     *
+     * 使用device affinity后，
+     * 一个异常高流量设备不能占满其他Worker的全部缓存。
+     */
+    static constexpr std::size_t kTelemetryQueueCapacity = 1000;
+
+    /**
+     * @brief 按Worker分片的Telemetry入口Queue。
+     *
+     * device_id经过稳定hash以后固定进入其中一个Queue。
+     */
+    std::vector<std::unique_ptr<TelemetryQueue>> telemetry_queues_;
+
+    /**
+     * @brief Processing Worker线程池。
+     */
+    std::vector<std::thread> telemetry_worker_threads_;
+
+    /**
+     * @brief CPU Processing与Northbound I/O之间的有界队列。
+     */
+    ProcessedTelemetryQueue uplink_queue_{1000};
+
+    /**
+     * @brief 唯一北向Worker。
+     *
+     * MQTT和SQLite仍保持单线程所有权。
+     */
+    std::thread uplink_worker_thread_;
 
     /**
      * @brief MQTT下行设备命令队列。
@@ -249,11 +327,14 @@ private:
     bool started_{false};
 
     /**
-     * @brief Telemetry Worker最近一次正常推进的单调时钟时间。
-     *
-     * 单位：milliseconds。
+     * @brief 每个Processing Worker自己的Watchdog心跳。
      */
-    std::atomic<std::int64_t> telemetry_worker_heartbeat_ms_{0};
+    std::vector<std::unique_ptr<std::atomic<std::int64_t>>> telemetry_worker_heartbeats_;
+
+    /**
+     * @brief Uplink Worker心跳。
+     */
+    std::atomic<std::int64_t> uplink_worker_heartbeat_ms_{0};
 
     /**
      * @brief Command Worker当前是否正在执行一条设备命令。

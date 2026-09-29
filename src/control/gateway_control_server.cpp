@@ -615,7 +615,8 @@ std::string GatewayControlServer::handleRequest(const std::string& request)
         */
         response += "Telemetry queue: " + std::to_string(gateway_.getTelemetryQueueSize()) + "/" + std::to_string(gateway_.getTelemetryQueueCapacity()) + "\n";
         response += "Dropped telemetry: " + std::to_string(gateway_.getDroppedTelemetryCount()) + "\n";
-
+        response +="Telemetry workers: " + std::to_string(gateway_.getTelemetryWorkerCount())+ "\n";
+        response +="Uplink queue: "+ std::to_string(gateway_.getUplinkQueueSize())+ "/"+ std::to_string(gateway_.getUplinkQueueCapacity())+ "\n";
         /*
         * 获取gatewayd当前进程资源快照。
         */
