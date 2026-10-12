@@ -33,6 +33,8 @@ add_executable(gatewayd
     src/core/command_router.cpp
 
     src/rules/rule_engine.cpp
+    
+    src/anomaly/anomaly_detector.cpp
 
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp

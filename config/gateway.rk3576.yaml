@@ -34,6 +34,32 @@ rules:
         parameters:
           value: 800
 
+# M3：工业时序滑动窗口与异常检测
+anomaly_detection:
+  enabled: true
+
+  profiles:
+    - id: plc_temperature
+      enabled: true
+
+      device_id: modbus-plc-01
+      metric: temperature
+
+      # 使用最近8次采样构建历史基线
+      window_size: 8
+
+      # 标准化异常分数阈值
+      score_threshold: 4.0
+
+      # 标准差下限
+      scale_floor: 0.5
+
+      # 最小绝对偏差，温度单位为℃
+      min_deviation: 3.0
+
+      # 采样间隔超过10秒则重置窗口
+      max_gap_ms: 10000
+
 connectors:
   # 第一阶段保留Mock，用于确认基础上行链。
   - name: simulator

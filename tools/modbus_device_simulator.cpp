@@ -4,6 +4,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 
 #include <sys/socket.h>
@@ -29,9 +30,43 @@ namespace
 
 } // namespace
 
-
-int main()
+int main(int argc, char* argv[])
 {
+    /*
+    * 默认不注入异常，保持原有模拟器行为。
+    *
+    * 指定 --spike-at-read 12 时，
+    * 在第12次Holding Register读取时注入一次40℃。
+    */
+    int spike_at_read = 0;
+    if (argc != 1)
+    {
+        if (argc != 3 ||std::strcmp(argv[1], "--spike-at-read") != 0)
+        {
+            std::cerr
+                << "Usage: modbus_device_simulator "
+                << "[--spike-at-read N]\n";
+            return 1;
+        }
+
+        char* end = nullptr;
+        errno = 0;
+
+        const long value =std::strtol(argv[2], &end, 10);
+
+        /*
+        * 至少第9次才允许注入，
+        * 确保M3的8条历史样本先完成预热。
+        */
+        if (errno != 0 ||end == argv[2] ||*end != '\0' ||value < 9 ||value > 100000)
+        {
+            std::cerr<< "Invalid spike-at-read value\n";
+            return 1;
+        }
+
+        spike_at_read = static_cast<int>(value);
+    }
+
     /*
     * 使用 sigaction 注册退出信号。
     *
@@ -44,8 +79,7 @@ int main()
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
 
-    if (sigaction(SIGINT, &sa, nullptr) < 0 ||
-        sigaction(SIGTERM, &sa, nullptr) < 0)
+    if (sigaction(SIGINT, &sa, nullptr) < 0 ||sigaction(SIGTERM, &sa, nullptr) < 0)
     {
         std::cerr << "Failed to install signal handler" << std::endl;
         return 1;
@@ -181,6 +215,13 @@ int main()
      */
     std::uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH]{};
 
+    /*
+    * 记录Modbus Holding Register读取请求次数。
+    *
+    * 只统计从地址0开始的读请求，
+    * 不统计写寄存器命令。
+    */
+    int holding_read_count = 0;
     while (g_running)
     {
         /*
@@ -196,6 +237,56 @@ int main()
 
         if (request_length > 0)
         {
+            /*
+            * Modbus TCP报文：
+            *
+            * 前7字节是MBAP Header。
+            * query[7]是Modbus Function Code。
+            *
+            * 0x03表示读取Holding Registers。
+            *
+            * query[8]、query[9]是起始寄存器地址。
+            *
+            * 这里只统计从地址0开始的读取。
+            */
+            const bool is_holding_read =request_length >= 12 &&query[7] == 0x03 &&query[8] == 0x00 &&query[9] == 0x00;
+
+            if (is_holding_read)
+            {
+                ++holding_read_count;
+
+                if (spike_at_read > 0 &&holding_read_count == spike_at_read)
+                {
+                    /*
+                    * 第N次读取之前，将HR0改成400。
+                    *
+                    * ModbusConnector按10倍缩放：
+                    * 400 → 40.0℃。
+                    */
+                    mapping->tab_registers[0] = 400;
+
+                    std::cout
+                        << "[M3 TEST] Inject 40.0C at read "
+                        << holding_read_count
+                        << std::endl;
+                }
+                else if (spike_at_read > 0 &&holding_read_count == spike_at_read + 1)
+                {
+                    /*
+                    * 下一次读取之前恢复25℃。
+                    *
+                    * 仅注入一个异常采样，
+                    * 避免把持续高温和突发异常混在一起。
+                    */
+                    mapping->tab_registers[0] = 250;
+
+                    std::cout
+                        << "[M3 TEST] Restore 25.0C at read "
+                        << holding_read_count
+                        << std::endl;
+                }
+            }
+
             /*
              * libmodbus根据收到的Function Code
              * 自动访问mapping中的寄存器，

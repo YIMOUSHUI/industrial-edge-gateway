@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <nlohmann/json.hpp>
+#include "anomaly/anomaly_config.h"
 
 struct  ConnectorConfig
 {
@@ -229,6 +230,14 @@ struct GatewayConfig
      * @brief 本地边缘规则。
      */
     std::vector<RuleConfig> rules;
+
+    /**
+     * @brief M3 工业时序异常检测配置。
+     *
+     * 包含总开关和多条设备指标检测配置。
+     * 默认 disabled，保持旧系统兼容性。
+     */
+    AnomalyConfig anomaly_detection;
 
     MqttConfig mqtt;
 

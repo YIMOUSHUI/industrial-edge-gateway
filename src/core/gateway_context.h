@@ -13,6 +13,7 @@
 #include "core/command_queue.h"
 #include "core/command_router.h"
 #include "rules/rule_engine.h"
+#include "anomaly/anomaly_detector.h"
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
@@ -101,6 +102,21 @@ public:
      * @brief 成功加入CommandQueue的本地规则动作数量。
      */
     std::uint64_t getLocalRuleActionCount() const;
+
+    /**
+     * @brief 当前启用的异常检测 Profile 数量。
+     */
+    std::size_t getEnabledAnomalyProfileCount() const;
+
+    /**
+     * @brief 已完成异常评分的总次数。
+     */
+    std::uint64_t getAnomalyWindowsScored() const;
+
+    /**
+     * @brief 被判定为异常的采样总次数。
+     */
+    std::uint64_t getAnomaliesDetected() const;
 
     /**
      * @brief 获取gatewayd当前Linux进程资源快照。
@@ -355,6 +371,35 @@ private:
      * 因此Rule状态无需跨Worker加锁。
      */
     std::vector<std::unique_ptr<RuleEngine>> rule_engines_;
+
+    /**
+     * @brief 每个 Telemetry Processing Worker 独占一个检测器。
+     *
+     * anomaly_detectors_[i] 对应 telemetry_worker_threads_[i]。
+     *
+     * 相同 device_id 始终由固定 Worker 处理，
+     * 因此检测器内部的滑动窗口不需要共享给其他 Worker。
+     *
+     * nullptr 表示 M3 功能没有启用。
+     */
+    std::vector<std::unique_ptr<AnomalyDetector>> anomaly_detectors_;
+
+    /**
+     * @brief 已完成异常评分的 Profile-采样次数。
+     *
+     * 窗口预热阶段不计入。
+     *
+     * 一条 Telemetry 如果匹配两个 Profile，
+     * 可以贡献两次评分。
+     */
+    std::atomic<std::uint64_t> anomaly_windows_scored_{0};
+
+    /**
+     * @brief 被判定为异常的评分次数。
+     *
+     * 这是异常采样次数，不是独立故障事件数量。
+     */
+    std::atomic<std::uint64_t> anomalies_detected_{0};
 
     /**
      * @brief 经过Rule Engine的Telemetry数量。

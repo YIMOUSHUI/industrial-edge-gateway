@@ -621,7 +621,12 @@ std::string GatewayControlServer::handleRequest(const std::string& request)
         response +="Rule messages evaluated: "+ std::to_string(gateway_.getRuleMessagesEvaluated())+ "\n";
         response +="Rule triggers: "+ std::to_string(gateway_.getRuleTriggerCount())+ "\n";
         response +="Local rule actions: "+ std::to_string(gateway_.getLocalRuleActionCount())+ "\n";
-
+        /*
+        * M3：异常检测运行状态。
+        */
+        response +="Anomaly profiles enabled: "+ std::to_string(gateway_.getEnabledAnomalyProfileCount())+ "\n";
+        response +="Anomaly windows scored: "+ std::to_string(gateway_.getAnomalyWindowsScored())+ "\n";
+        response +="Anomalies detected: "+ std::to_string(gateway_.getAnomaliesDetected())+ "\n";
         /*
         * 获取gatewayd当前进程资源快照。
         */

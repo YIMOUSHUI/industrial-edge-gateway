@@ -66,7 +66,21 @@ bool GatewayContext::start(const std::string& config_path)
     telemetry_worker_threads_.clear();
     telemetry_worker_heartbeats_.clear();
 
+    /*
+    * 清理 M2、M3 的运行对象。
+    */
     rule_engines_.clear();
+    anomaly_detectors_.clear();
+
+    /*
+    * 每次 Gateway 启动时重置 M3 统计指标。
+    */
+    anomaly_windows_scored_.store(0,std::memory_order_relaxed);
+    anomalies_detected_.store(0,std::memory_order_relaxed);
+
+    /*
+    * 原有 M2 统计逻辑保持不变。
+    */
     rule_messages_evaluated_.store(0);
     rule_triggers_total_.store(0);
     local_rule_actions_total_.store(0);
@@ -103,6 +117,26 @@ bool GatewayContext::start(const std::string& config_path)
         * 为每个Worker复制一份的成本可以忽略。
         */
         rule_engines_.push_back(std::make_unique<RuleEngine>(config.rules));
+
+        /*
+        * M3：每个 Processing Worker 拥有独立的
+        * AnomalyDetector。
+        *
+        * 配置启用：
+        *   创建实际检测器并复制 Profile 配置。
+        *
+        * 配置关闭：
+        *   保存 nullptr，不运行异常检测。
+        */
+        if (config.anomaly_detection.enabled)
+        {
+            anomaly_detectors_.push_back(std::make_unique<AnomalyDetector>(config.anomaly_detection.profiles));
+        }
+        else
+        {
+            anomaly_detectors_.push_back(nullptr);
+        }
+
     }
 
     /*
@@ -947,6 +981,80 @@ void GatewayContext::telemetryWorkerLoop(std::size_t worker_index)
         );
 
         /*
+        * ---------------- M3 Anomaly Detection ----------------
+        *
+        * 执行顺序：
+        *
+        * 原始 TelemetryMessage
+        *      ↓
+        * AnomalyDetector::evaluate()
+        *      ↓
+        * 将异常分数加入 message.metrics
+        *      ↓
+        * 后续 Rule Engine 读取衍生指标
+        *
+        * 每个 Worker 访问自己的 AnomalyDetector，
+        * 不需要跨 Worker 共享滑动窗口状态。
+        */
+        if (worker_index < anomaly_detectors_.size())
+        {
+            AnomalyDetector* detector = anomaly_detectors_[worker_index].get();
+            /*
+            * nullptr 表示 M3 功能未启用。
+            */
+            if (detector != nullptr)
+            {
+                /*
+                * 根据当前 TelemetryMessage，
+                * 更新滑动窗口并获得已经完成预热的评分。
+                */
+                const std::vector<AnomalyScore> scores = detector->evaluate(message);
+                for (const AnomalyScore& result : scores)
+                {
+                    /*
+                    * 每个评分结果对应一个 Profile 的一次评分。
+                    */
+                    anomaly_windows_scored_.fetch_add(1,std::memory_order_relaxed);
+                    /*
+                    * 将统计异常分数转为统一指标。
+                    *
+                    * 例如：
+                    * anomaly.plc_temperature.score = 30.0
+                    *
+                    * 这样既可以被 Rule Engine 读取，
+                    * 也可以被 TelemetryConverter 序列化。
+                    */
+                    MetricValue score_metric;
+
+                    score_metric.name = "anomaly." + result.profile_id + ".score";
+                    score_metric.value = result.score;
+
+                    // 异常分数为无量纲数值
+                    score_metric.unit = "";
+                    message.metrics.push_back(std::move(score_metric));
+
+                    /*
+                    * 超过检测阈值时增加统计和记录告警日志。
+                    *
+                    * M3 不直接生成 DeviceCommand。
+                    */
+                    if (result.anomalous)
+                    {
+                        anomalies_detected_.fetch_add(1,std::memory_order_relaxed);
+                        Logger::warn(
+                            "Anomaly detected: profile="+ result.profile_id
+                            + ", device="+ result.device_id
+                            + ", metric="+ result.metric
+                            + ", value="+ std::to_string(result.features.current)
+                            + ", baseline_mean="+ std::to_string(result.features.mean)
+                            + ", score="+ std::to_string(result.score)
+                        );
+                    }
+                }
+            }
+        }
+
+        /*
         * ---------------- Rule Engine ----------------
         *
         * Rule Engine运行在Processing Worker阶段。
@@ -1462,6 +1570,44 @@ std::uint64_t GatewayContext::getRuleTriggerCount() const
 std::uint64_t GatewayContext::getLocalRuleActionCount() const
 {
     return local_rule_actions_total_.load(std::memory_order_relaxed);
+}
+
+/**
+ * @brief 返回真正启用的 M3 Profile 数量。
+ */
+std::size_t GatewayContext::getEnabledAnomalyProfileCount() const
+{
+    const AnomalyConfig& config = config_.data().anomaly_detection;
+    if (!config.enabled)
+    {
+        return 0;
+    }
+    std::size_t count = 0;
+
+    for (const AnomalyProfileConfig& profile : config.profiles)
+    {
+        if (profile.enabled)
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/**
+ * @brief 返回已经完成的异常评分次数。
+ */
+std::uint64_t GatewayContext::getAnomalyWindowsScored() const
+{
+    return anomaly_windows_scored_.load(std::memory_order_relaxed);
+}
+
+/**
+ * @brief 返回满足异常判定条件的评分次数。
+ */
+std::uint64_t GatewayContext::getAnomaliesDetected() const
+{
+    return anomalies_detected_.load(std::memory_order_relaxed);
 }
 
 ProcessMetrics GatewayContext::getProcessMetrics() const

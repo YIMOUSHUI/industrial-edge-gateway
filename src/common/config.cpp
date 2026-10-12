@@ -1,7 +1,11 @@
 #include "common/config.h"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <unordered_set>
+#include <utility>
+
 #include <yaml-cpp/yaml.h>
 
 bool Config::load(const std::string& path)
@@ -273,6 +277,206 @@ bool Config::load(const std::string& path)
                     }
                 }
                 data_.rules.push_back(std::move(rule));
+            }
+        }
+
+        /*
+        * M3：加载工业时序异常检测配置。
+        *
+        * 如果 YAML 中没有 anomaly_detection，
+        * 默认关闭，不影响原有 M2 功能。
+        *
+        * 使用 {} 重置，避免重复调用 load() 时
+        * 保留上一次加载的 Profile。
+        */
+        data_.anomaly_detection = AnomalyConfig{};
+        if (root["anomaly_detection"])
+        {
+            const YAML::Node anomaly_node = root["anomaly_detection"];
+            /*
+            * anomaly_detection 必须是 YAML 映射。
+            * 不能直接写成字符串或数组。
+            */
+            if (!anomaly_node.IsMap())
+            {
+                std::cerr<< "[Config] anomaly_detection must be a map\n";
+                return false;
+            }
+
+            /*
+            * 读取总开关。
+            * 未配置时保留默认值 false。
+            */
+            if (anomaly_node["enabled"])
+            {
+                data_.anomaly_detection.enabled = anomaly_node["enabled"].as<bool>();
+            }
+
+            /*
+            * profiles 必须是 YAML 数组。
+            */
+            if (anomaly_node["profiles"])
+            {
+                const YAML::Node profiles_node = anomaly_node["profiles"];
+                if (!profiles_node.IsSequence())
+                {
+                    std::cerr
+                        << "[Config] anomaly_detection.profiles "
+                        << "must be a sequence\n";
+
+                    return false;
+                }
+
+                /*
+                * 用于检查 Profile ID 是否重复。
+                */
+                std::unordered_set<std::string> profile_ids;
+                for (const YAML::Node& item : profiles_node)
+                {
+                    /*
+                    * 每条 Profile 至少需要：
+                    * id、device_id、metric。
+                    */
+                    if (!item.IsMap() ||!item["id"] ||!item["device_id"] ||!item["metric"])
+                    {
+                        std::cerr
+                            << "[Config] anomaly profile requires "
+                            << "id, device_id and metric\n";
+                        return false;
+                    }
+
+                    AnomalyProfileConfig profile;
+                    profile.id = item["id"].as<std::string>();
+                    profile.device_id = item["device_id"].as<std::string>();
+                    profile.metric = item["metric"].as<std::string>();
+
+                    /*
+                    * 读取可选字段。
+                    * 没写的参数使用结构体中的默认值。
+                    */
+                    if (item["enabled"])
+                    {
+                        profile.enabled = item["enabled"].as<bool>();
+                    }
+
+                    if (item["window_size"])
+                    {
+                        /*
+                        * 先读取成有符号整数。
+                        * 避免负数直接转换成 size_t。
+                        */
+                        const std::int64_t value = item["window_size"].as<std::int64_t>();
+                        if (value < 2 || value > 256)
+                        {
+                            std::cerr
+                                << "[Config] window_size must be "
+                                << "in [2, 256]: "
+                                << profile.id << '\n';
+
+                            return false;
+                        }
+                        profile.window_size = static_cast<std::size_t>(value);
+                    }
+
+                    if (item["score_threshold"])
+                    {
+                        profile.score_threshold = item["score_threshold"].as<double>();
+                    }
+
+                    if (item["scale_floor"])
+                    {
+                        profile.scale_floor = item["scale_floor"].as<double>();
+                    }
+
+                    if (item["min_deviation"])
+                    {
+                        profile.min_deviation = item["min_deviation"].as<double>();
+                    }
+
+                    if (item["max_gap_ms"])
+                    {
+                        const std::int64_t value = item["max_gap_ms"].as<std::int64_t>();
+                        if (value <= 0)
+                        {
+                            std::cerr << "[Config] max_gap_ms must be "<< "positive: "<< profile.id << '\n';
+                            return false;
+                        }
+                        profile.max_gap_ms = static_cast<std::uint64_t>(value);
+                    }
+
+                    /*
+                    * 检查 ID 是否只包含字母、数字、
+                    * 下划线和连字符。
+                    *
+                    * 后续会用 Profile ID 构造
+                    * anomaly.<profile_id>.score 指标名称。
+                    */
+                    const bool valid_id = std::all_of(profile.id.begin(),profile.id.end(),
+                        [](unsigned char c)
+                        {
+                            return
+                                (c >= 'a' && c <= 'z') ||
+                                (c >= 'A' && c <= 'Z') ||
+                                (c >= '0' && c <= '9') ||
+                                c == '_' || c == '-';
+                        }
+                    );
+
+                    /*
+                    * 集中校验配置合法性。
+                    */
+                    if (profile.id.empty() ||!valid_id ||profile.device_id.empty() ||profile.metric.empty() ||profile.window_size < 2 ||
+                        profile.window_size > 256 ||profile.max_gap_ms == 0 ||!std::isfinite(profile.score_threshold) ||profile.score_threshold <= 0.0 ||
+                        !std::isfinite(profile.scale_floor) ||profile.scale_floor <= 0.0 ||!std::isfinite(profile.min_deviation) ||profile.min_deviation < 0.0)
+                    {
+                        std::cerr
+                            << "[Config] invalid anomaly profile: "
+                            << profile.id << '\n';
+
+                        return false;
+                    }
+
+                    /*
+                    * 不允许出现重复 ID。
+                    */
+                    if (!profile_ids.insert(profile.id).second)
+                    {
+                        std::cerr
+                            << "[Config] duplicate anomaly profile id: "
+                            << profile.id << '\n';
+
+                        return false;
+                    }
+
+                    /*
+                    * 校验通过后，保存当前 Profile。
+                    */
+                    data_.anomaly_detection.profiles.push_back(std::move(profile));
+                }
+            }
+
+            /*
+            * 如果启用异常检测，
+            * 至少必须有一条真正启用的 Profile。
+            */
+            if (data_.anomaly_detection.enabled)
+            {
+                const auto& profiles = data_.anomaly_detection.profiles;
+                const bool has_enabled_profile = std::any_of(profiles.begin(),profiles.end(),
+                    [](const AnomalyProfileConfig& profile)
+                    {
+                        return profile.enabled;
+                    }
+                );
+
+                if (!has_enabled_profile)
+                {
+                    std::cerr
+                        << "[Config] anomaly detection enabled "
+                        << "but no active profiles configured\n";
+
+                    return false;
+                }
             }
         }
 
