@@ -67,10 +67,11 @@ bool GatewayContext::start(const std::string& config_path)
     telemetry_worker_heartbeats_.clear();
 
     /*
-    * 清理 M2、M3 的运行对象。
+    * 清理 M2、M3、M4 的运行对象。
     */
     rule_engines_.clear();
     anomaly_detectors_.clear();
+    ai_anomaly_detectors_.clear();
 
     /*
     * 每次 Gateway 启动时重置 M3 统计指标。
@@ -136,7 +137,17 @@ bool GatewayContext::start(const std::string& config_path)
         {
             anomaly_detectors_.push_back(nullptr);
         }
-
+         /*
+         * M4稍后只在负责目标device_id的Worker
+         * 创建实际实例。
+         *
+         * 这里先保证：
+         *
+         * ai_anomaly_detectors_[i]
+         *
+         * 和Worker编号完全对应。
+         */
+        ai_anomaly_detectors_.push_back(nullptr);
     }
 
     /*
@@ -152,6 +163,78 @@ bool GatewayContext::start(const std::string& config_path)
     Logger::init(config.log_level);
     Logger::info("Gateway starting");
     Logger::info("Gateway id=" + config.gateway_id);
+
+        /*
+    * ---------------- M4 AI Initialization ----------------
+    *
+    * AI属于增强能力。
+    *
+    * 即使RKNN Runtime、模型文件或预处理配置出现问题，
+    * 也不能影响：
+    *
+    * TCP / CAN / Modbus / MQTT / M2 / M3
+    *
+    * 的基础网关功能。
+    */
+    if (config.ai_inference.enabled)
+    {
+        if (!RknnInferenceEngine::runtimeAvailable())
+        {
+            Logger::warn(
+                "M4 AI is enabled in config, but "
+                "RKNN Runtime is unavailable in this build; "
+                "AI inference is disabled"
+            );
+        }
+        else
+        {
+            /*
+             * 和handleMessage()使用完全相同的
+             * device affinity算法。
+             *
+             * 因此skab-valve-demo后续一定进入
+             * 持有这个AI Detector的Worker。
+             */
+            const std::size_t ai_worker_index =
+                std::hash<std::string>{}(
+                    config.ai_inference.device_id
+                )
+                %
+                ai_anomaly_detectors_.size();
+
+            auto detector =
+                std::make_unique<
+                    AiAnomalyDetector
+                >(
+                    config.ai_inference
+                );
+
+            if (!detector->initialize())
+            {
+                /*
+                 * Fail-open：
+                 *
+                 * AI坏了，只关闭AI。
+                 * Gateway主体继续运行。
+                 */
+                Logger::error("M4 AI initialization failed; "
+                    "AI inference is disabled: "
+                    + detector->lastError()
+                );
+            }
+            else
+            {
+                Logger::info("M4 AI initialized: model=" + detector->modelId()
+                    + ", device=" + config.ai_inference.device_id
+                    + ", worker=" + std::to_string(ai_worker_index)
+                    + ", window=" + std::to_string(detector->windowSize())
+                    + ", stride=" + std::to_string(detector->stride())
+                    + ", threshold=" + std::to_string(detector->threshold())
+                );
+                ai_anomaly_detectors_[ai_worker_index] = std::move(detector);
+            }
+        }
+    }
 
     /*
     * 根据配置创建 MQTT Publisher。
@@ -1050,6 +1133,95 @@ void GatewayContext::telemetryWorkerLoop(std::size_t worker_index)
                             + ", score="+ std::to_string(result.score)
                         );
                     }
+                }
+            }
+        }
+
+        /*
+        * ---------------- M4 NPU AI Detection ----------------
+        *
+        * 当前顺序：
+        *
+        * 原始Telemetry
+        *      ↓
+        * M3统计异常检测
+        *      ↓
+        * M4多变量AI检测
+        *      ↓
+        * Rule Engine
+        *
+        * M4只处理配置指定的device_id。
+        */
+        if (worker_index <ai_anomaly_detectors_.size())
+        {
+            AiAnomalyDetector* detector = ai_anomaly_detectors_[worker_index].get();
+
+            if (detector != nullptr)
+            {
+                AiInferenceResult ai_result;
+
+                const AiEvaluateStatus status = detector->evaluate(message,ai_result);
+                if (status == AiEvaluateStatus::Inferred)
+                {
+                    /*
+                     * 将AI异常概率写回统一Metrics。
+                     *
+                     * 后面的：
+                     *
+                     * RuleEngine
+                     * MQTT
+                     *
+                     * 都可以直接使用。
+                     */
+                    MetricValue probability_metric;
+
+                    probability_metric.name = "ai." + ai_result.model_id + ".probability";
+
+                    probability_metric.value = ai_result.probability;
+
+                    probability_metric.unit = "";
+
+                    message.metrics.push_back(std::move(probability_metric));
+
+                    /*
+                     * 同时输出0/1异常状态，
+                     * 方便MQTT展示和后续业务逻辑使用。
+                     */
+                    MetricValue anomaly_metric;
+
+                    anomaly_metric.name = "ai." + ai_result.model_id + ".anomalous";
+
+                    anomaly_metric.value = ai_result.anomalous ? 1.0 : 0.0;
+
+                    anomaly_metric.unit = "";
+
+                    message.metrics.push_back(std::move(anomaly_metric));
+
+                    Logger::debug("M4 AI inference: model=" + ai_result.model_id
+                        + ", device=" + ai_result.device_id
+                        + ", sequence=" + std::to_string(ai_result.sequence)
+                        + ", logit=" + std::to_string(ai_result.logit)
+                        + ", probability=" + std::to_string(ai_result.probability)
+                        + ", threshold=" + std::to_string(ai_result.threshold)
+                    );
+
+                    if (ai_result.anomalous)
+                    {
+                        Logger::warn("M4 AI anomaly detected: model=" + ai_result.model_id
+                            + ", device=" + ai_result.device_id
+                            + ", probability=" + std::to_string(ai_result.probability)
+                            + ", threshold=" + std::to_string(ai_result.threshold)
+                        );
+                    }
+                }
+                else if (status ==AiEvaluateStatus::Error)
+                {
+                    /*
+                     * 单次AI失败不丢弃Telemetry。
+                     *
+                     * 下面的RuleEngine和MQTT继续处理。
+                     */
+                    Logger::warn("M4 AI processing failed: " + detector->lastError());
                 }
             }
         }

@@ -14,6 +14,7 @@
 #include "core/command_router.h"
 #include "rules/rule_engine.h"
 #include "anomaly/anomaly_detector.h"
+#include "ai/ai_anomaly_detector.h"
 #include "connectors/iconnector.h"
 #include "model/telemetry_message.h"
 #include "common/config.h"
@@ -383,6 +384,18 @@ private:
      * nullptr 表示 M3 功能没有启用。
      */
     std::vector<std::unique_ptr<AnomalyDetector>> anomaly_detectors_;
+
+    /**
+     * @brief 每个Processing Worker对应的M4检测器。
+     *
+     * 当前只有负责ai_inference.device_id的Worker
+     * 真正持有AiAnomalyDetector。
+     *
+     * 其他Worker保存nullptr。
+     *
+     * 这样避免4个Worker各加载一份19MB RKNN模型。
+     */
+    std::vector<std::unique_ptr<AiAnomalyDetector>> ai_anomaly_detectors_;
 
     /**
      * @brief 已完成异常评分的 Profile-采样次数。

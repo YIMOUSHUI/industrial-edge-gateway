@@ -216,6 +216,52 @@ struct RuleConfig
     std::vector<RuleActionConfig> actions;
 };
 
+/**
+ * @brief M4 NPU时序AI异常检测配置。
+ *
+ * 当前第一版：
+ * 一个Gateway加载一个RKNN时序模型，
+ * 对指定device_id执行64×8多变量时序推理。
+ */
+struct AiInferenceConfig
+{
+    /**
+     * 是否启用M4 NPU推理。
+     */
+    bool enabled = false;
+
+    /**
+     * 当前模型对应的设备。
+     *
+     * 当前SKAB模型只用于阀门/水泵实验数据，
+     * 不直接用于modbus-plc-01。
+     */
+    std::string device_id;
+
+    /**
+     * RKNN模型文件。
+     *
+     * systemd已经设置：
+     * WorkingDirectory=/home/cat/industrial-edge-gateway
+     *
+     * 因此这里可以使用项目相对路径。
+     */
+    std::string model_path;
+
+    /**
+     * 模型预处理配置。
+     *
+     * 包含：
+     * features
+     * mean
+     * std
+     * window_size
+     * stride
+     * threshold
+     */
+    std::string preprocess_path;
+};
+
 struct GatewayConfig
 {
     std::string gateway_id;
@@ -238,6 +284,11 @@ struct GatewayConfig
      * 默认 disabled，保持旧系统兼容性。
      */
     AnomalyConfig anomaly_detection;
+
+    /**
+     * @brief M4 RK3576 NPU时序AI推理。
+     */
+    AiInferenceConfig ai_inference;
 
     MqttConfig mqtt;
 

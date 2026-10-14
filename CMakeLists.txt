@@ -36,6 +36,9 @@ add_executable(gatewayd
     
     src/anomaly/anomaly_detector.cpp
 
+    src/ai/rknn_inference_engine.cpp
+    src/ai/ai_anomaly_detector.cpp
+    
     src/connectors/mock_connector.cpp
     src/connectors/tcp_connector.cpp
     src/connectors/can_connector.cpp
@@ -75,6 +78,64 @@ if(NOT CMAKE_CROSSCOMPILING)
         PRIVATE
         PkgConfig::LIBMODBUS
     )
+endif()
+
+# ------------------------------------------------------------
+# M4 RK3576 RKNN Runtime
+#
+# Ubuntu开发机：
+#   通常找不到rknn_api.h / librknnrt.so，
+#   此时gatewayd编译为无RKNN后端版本。
+#
+# RK3576：
+#   librknnrt.so已经安装到系统；
+#   rknn_api.h使用此前验证官方Demo时的SDK路径。
+# ------------------------------------------------------------
+find_path(
+    RKNN_API_INCLUDE_DIR
+    rknn_api.h
+
+    HINTS
+    /home/cat/rknn-m4-lab/rknpu2/runtime/Linux/librknn_api/include
+)
+
+find_library(
+    RKNNRT_LIBRARY
+    rknnrt
+)
+
+if(RKNN_API_INCLUDE_DIR AND RKNNRT_LIBRARY)
+
+    message(
+        STATUS
+        "RKNN Runtime enabled: ${RKNNRT_LIBRARY}"
+    )
+
+    target_compile_definitions(
+        gatewayd
+        PRIVATE
+        GATEWAY_HAS_RKNN=1
+    )
+
+    target_include_directories(
+        gatewayd
+        PRIVATE
+        ${RKNN_API_INCLUDE_DIR}
+    )
+
+    target_link_libraries(
+        gatewayd
+        PRIVATE
+        ${RKNNRT_LIBRARY}
+    )
+
+else()
+    message(
+        STATUS
+        "RKNN Runtime not found; "
+        "gatewayd will build without RKNN backend"
+    )
+
 endif()
 
 target_include_directories(gatewayd
