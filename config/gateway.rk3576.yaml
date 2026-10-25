@@ -5,7 +5,7 @@ runtime:
   worker_threads: 4
 
 logging:
-  level: debug
+  level: warn
 
 # 本地边缘规则。
 #
@@ -118,7 +118,7 @@ mqtt:
 watchdog:
   # 第一轮功能验证先关闭。
   # 等其他模块全部正常以后再单独打开真实/dev/watchdog0。
-  enabled: false
+  enabled: true
 
   device: /dev/watchdog0
   timeout_sec: 15

@@ -111,6 +111,26 @@ def main():
         help="Delay between two sensor samples",
     )
 
+    parser.add_argument(
+        "--run-index",
+        type=int,
+        default=None,
+        help=(
+            "Validation run index. "
+            "If omitted, automatically choose "
+            "an anomalous validation run."
+        ),
+    )
+
+    parser.add_argument(
+        "--list-runs",
+        action="store_true",
+        help=(
+            "List validation runs and exit "
+            "without opening a TCP connection."
+        ),
+    )
+
     args = parser.parse_args()
 
     runs = load_skab_runs("valid")
@@ -120,7 +140,72 @@ def main():
             "SKAB validation split is empty"
         )
 
-    run_index, run = choose_validation_run(runs)
+    if args.list_runs:
+        total_windows = 0
+
+        print(
+            "Validation runs:",
+            len(runs),
+        )
+
+        print()
+
+        for index, current_run in enumerate(runs):
+            row_count = len(current_run)
+
+            window_count = (
+                0
+                if row_count < 64
+                else
+                (row_count - 64) // 8 + 1
+            )
+
+            anomaly_rows = 0
+
+            if "anomaly" in current_run.columns:
+                anomaly_rows = int(
+                    current_run["anomaly"]
+                    .fillna(0)
+                    .astype(float)
+                    .sum()
+                )
+
+            total_windows += window_count
+
+            print(
+                f"run={index} "
+                f"rows={row_count} "
+                f"windows={window_count} "
+                f"anomaly_rows={anomaly_rows}"
+            )
+
+        print()
+        print(
+            f"Total validation windows: "
+            f"{total_windows}"
+        )
+
+        return
+
+
+    if args.run_index is None:
+        run_index, run = choose_validation_run(
+            runs
+        )
+    else:
+        if (
+            args.run_index < 0
+            or args.run_index >= len(runs)
+        ):
+            raise RuntimeError(
+                "run-index out of range: "
+                f"{args.run_index}, "
+                f"valid range is "
+                f"0..{len(runs) - 1}"
+            )
+
+        run_index = args.run_index
+        run = runs[run_index]
 
     missing = [
         name

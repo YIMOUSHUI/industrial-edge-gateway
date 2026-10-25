@@ -195,19 +195,9 @@ bool GatewayContext::start(const std::string& config_path)
              * 因此skab-valve-demo后续一定进入
              * 持有这个AI Detector的Worker。
              */
-            const std::size_t ai_worker_index =
-                std::hash<std::string>{}(
-                    config.ai_inference.device_id
-                )
-                %
-                ai_anomaly_detectors_.size();
+            const std::size_t ai_worker_index = std::hash<std::string>{}(config.ai_inference.device_id) % ai_anomaly_detectors_.size();
 
-            auto detector =
-                std::make_unique<
-                    AiAnomalyDetector
-                >(
-                    config.ai_inference
-                );
+            auto detector = std::make_unique<AiAnomalyDetector>(config.ai_inference);
 
             if (!detector->initialize())
             {

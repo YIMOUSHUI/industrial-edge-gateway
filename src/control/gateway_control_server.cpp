@@ -42,7 +42,7 @@ bool GatewayControlServer::start()
      * SOCK_STREAM：
      *   使用可靠、有序的字节流连接。
      */
-    listen_fd_ =socket(AF_UNIX,SOCK_STREAM,0);
+    listen_fd_ = socket(AF_UNIX,SOCK_STREAM,0);
 
     if (listen_fd_ < 0)
     {

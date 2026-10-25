@@ -12,7 +12,6 @@ AiAnomalyDetector::AiAnomalyDetector(AiInferenceConfig config): config_(std::mov
 {
 }
 
-
 bool AiAnomalyDetector::initialize()
 {
     last_error_.clear();

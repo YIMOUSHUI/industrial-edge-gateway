@@ -1,304 +1,149 @@
 # Industrial Edge Gateway
 
-> 基于 **C++17 / Embedded Linux** 的多协议工业边缘网关。  
-> 面向工业设备数据采集、云端遥测上报与远程控制场景，已完成 **i.MX6ULL + Buildroot Linux** 板端部署、故障恢复验证与 24 h 长稳测试。
+**基于 C++17 / Embedded Linux 的多协议工业边缘智能网关**
 
-## Overview
+面向工业设备异构接入、可靠遥测上报与边缘智能分析，项目以 Linux 用户态服务 `gatewayd` 为核心，集成 **TCP / SocketCAN / Modbus TCP、epoll + eventfd、设备亲和性 Worker、MQTT QoS 1、SQLite 离线补发、规则引擎以及 RK3576 NPU 时序异常检测**。
 
-本项目实现一个运行在嵌入式 Linux 设备上的工业边缘网关：南向统一接入 **TCP、SocketCAN、Modbus TCP** 设备，北向通过 **MQTT** 与云端通信，并围绕设备通信场景实现消息路由、离线存储、故障恢复、硬件 Watchdog 和运行状态观测。
+- **RK3576**：部署多变量时序异常检测模型，通过 RKNN Runtime 在 NPU 上推理；提供独立的板端配置 `config/gateway.rk3576.yaml`。
+- **i.MX6ULL**：完成 Buildroot Linux / ARM 交叉编译部署、工业通信链路与硬件 Watchdog 验证；保留板端配置 `config/gateway.imx6ull.yaml`。
+- **Ubuntu**：提供可复现的 TCP / Modbus 模拟设备、`vcan0`、Mosquitto 和本地管理工具。
 
-核心关注点不是简单“接入多个协议”，而是完整的 Linux 设备端软件工程链路：
+> 项目定位：面向嵌入式 Linux 软件开发的工程实践原型，重点关注协议解耦、消息有序处理、异常恢复、背压、板端部署和可观测性；不宣称已达到商用工业产品认证要求。
 
-- `epoll + non-blocking socket + eventfd` TCP I/O 事件循环
-- 多协议 `IConnector` 抽象与统一 Telemetry / Command 数据模型
-- 线程安全有界队列与过载保护
-- MQTT 断网容错与 SQLite Store-and-Forward
-- MQTT → CommandRouter → Device 双向控制链路
-- `/dev/watchdog0` 硬件 Watchdog 与进程假死恢复
-- Unix Domain Socket 管理面与 `gatewayctl` 运行状态查询
-- Ubuntu 开发验证 + Buildroot ARM 交叉编译 + i.MX6ULL 板端部署
-
----
-
-## Architecture
+## 1. 系统架构
 
 ```mermaid
 flowchart TB
-    Cloud["MQTT Broker / Cloud"]
+    TCP["TCP 设备"] --> CONN["IConnector / 统一遥测模型"]
+    CAN["SocketCAN 设备"] --> CONN
+    MB["Modbus TCP 设备"] --> CONN
 
-    subgraph Gateway["Industrial Edge Gateway"]
-        direction TB
+    CONN --> ROUTE["按 device_id 哈希分配 Worker"]
+    ROUTE --> Q1["有界 TelemetryQueue × N"]
+    Q1 --> PROC["Processing Worker × N\n规则引擎 / 时序异常检测 / RKNN"]
+    PROC --> Q2["有界 ProcessedTelemetryQueue"]
+    Q2 --> UP["Uplink Worker\nMQTT 重连 / SQLite 缓存与补发"]
+    UP <--> DB[(SQLite OfflineStore)]
+    UP --> CLOUD["MQTT Broker / Cloud"]
 
-        MQTT["MQTT Publisher / Subscriber"]
-        Core["TelemetryQueue / CommandQueue<br/>CommandRouter / SQLite OfflineStore"]
+    CLOUD --> CB["MQTT Command Callback"]
+    CB --> CQ["CommandQueue"]
+    PROC -.->|本地规则命令| CQ
+    CQ --> CW["Command Worker"]
+    CW --> CR["CommandRouter"]
+    CR --> TCP
+    CR --> CAN
+    CR --> MB
 
-        subgraph Connectors["Protocol Connectors"]
-            direction LR
-            TCP["TCP Connector"]
-            CAN["SocketCAN Connector"]
-            MODBUS["Modbus TCP Connector"]
-        end
-
-        Runtime["GatewayControlServer / WatchdogManager"]
-
-        MQTT --> Core
-        Core --> TCP
-        Core --> CAN
-        Core --> MODBUS
-        Core --> Runtime
-    end
-
-    Cloud --> MQTT
-
-    TCP --> TCPDEV["TCP Device"]
-    CAN --> CANDEV["CAN Device"]
-    MODBUS --> PLC["Modbus TCP PLC"]
-
-    Runtime --> LOCAL["gatewayctl / watchdog0"]
+    CTL["gatewayctl / Unix Domain Socket"] --> GOV["GatewayControlServer"]
+    WD["Hardware Watchdog"] --- GOV
 ```
 
-### Telemetry Path
+### 遥测上行
 
 ```text
-TCP / CAN / Modbus Device
-          │
-          ▼
-      IConnector
-          │
-          ▼
- TelemetryMessage
-          │
-          ▼
-   TelemetryQueue
-          │
-          ▼
- Telemetry Worker
-      │         │
-      │         └── MQTT unavailable ──> SQLite OfflineStore
-      │                                      │
-      └── MQTT publish <──────────────────────┘
-                  Broker recovery / replay
+设备（TCP / CAN / Modbus）
+  → Connector 协议解析
+  → TelemetryMessage
+  → 按 device_id 哈希选定有界队列
+  → Processing Worker（规则、异常检测、必要时 NPU 推理）
+  → ProcessedTelemetry（消息 + 序列化后的 JSON）
+  → Uplink Worker
+  → MQTT QoS 1
+      └─ Broker 不可用：SQLite 落盘 → 重连后补发
 ```
 
-### Command Path
+同一 `device_id` 通过设备亲和性路由进入固定的处理 Worker，从而维护单设备时序状态。处理队列和上行队列职责分离：**入口队列满时拒绝新消息并计入 Dropped；上行队列满时等待容量释放，向前传递背压**。
+
+### 控制下行
 
 ```text
-MQTT Command
-     │
-     ▼
-CommandConverter
-     │
-     ▼
- CommandQueue
-     │
-     ▼
-CommandRouter
-     │
-     ├── TcpConnector
-     ├── CanConnector
-     └── ModbusConnector
-             │
-             ▼
-           Device
+MQTT JSON 命令
+  → CommandConverter::fromJson() → DeviceCommand
+  → CommandQueue → Command Worker
+  → CommandRouter（device_id → IConnector）
+      ├─ TCP：构建长度头 + JSON 帧 → pending_commands_
+      │       → eventfd 唤醒 TCP I/O 线程 → send_buffer → EPOLLOUT → send()
+      ├─ CAN：转换并发送 CAN 帧
+      └─ Modbus：执行目标寄存器写操作
 ```
 
----
+本地规则引擎生成的 `DeviceCommand` 也复用同一条 `CommandQueue → CommandRouter` 控制链路。
 
-## Key Features
+## 2. 核心设计与实现
 
-### 1. Linux TCP I/O
-
-`TcpConnector` 基于 Linux I/O 多路复用管理设备长连接：
-
-- non-blocking socket
-- `epoll` I/O event loop
-- `eventfd` 跨线程唤醒
-- 4-byte length-prefix 应用层帧协议
-- TCP 粘包 / 拆包处理
-- partial send 与发送缓冲区管理
-- 动态 `EPOLLOUT` 关注
-- 异常断连与 fd 生命周期清理
-- `device_id -> connection` 路由关系维护
-
-业务线程不会直接操作 TCP connection socket。下行命令进入待发送队列后，通过 `eventfd` 唤醒阻塞在 `epoll_wait()` 的 I/O Thread，由 I/O Thread 统一处理 socket 写操作。
-
-```mermaid
-sequenceDiagram
-    participant CW as Command Worker
-    participant Q as Pending Queue
-    participant E as eventfd
-    participant IO as TCP I/O Thread
-    participant D as TCP Device
-
-    CW->>Q: enqueue command
-    CW->>E: write(eventfd)
-    E->>IO: wake epoll_wait()
-    IO->>Q: dequeue command
-    IO->>D: non-blocking send
-```
-
-### 2. Unified Connector Model
-
-不同南向协议统一实现 `IConnector`，由 `GatewayContext` 管理生命周期与消息回调。
-
-| Connector | Function |
+| 模块 | 实现重点 |
 | --- | --- |
-| TCP | 工业 TCP 设备接入与双向命令下发 |
-| SocketCAN | Linux CAN 接收 / 发送，开发环境使用 `vcan0` |
-| Modbus TCP | PLC 周期轮询、自动重连、Holding Register 写入 |
-| Mock | 本地链路验证 |
+| 多协议接入 | `IConnector` 统一接口；TCP、SocketCAN、Modbus TCP 的独立协议适配 |
+| TCP 并发 I/O | 非阻塞 Socket、`epoll`、每连接读写缓冲区、4 字节网络序长度头、粘包/半包解析、部分发送、动态 `EPOLLOUT` |
+| 跨线程通知 | 业务线程通过共享待发送队列传递任务，用 `eventfd` 唤醒 TCP I/O 线程；由 I/O 线程统一调用 `send()` |
+| 多 Worker 调度 | `runtime.worker_threads` 配置并行度；按 `hash(device_id) % N` 路由，支持设备亲和性处理 |
+| 队列与背压 | 多个有界遥测入口队列、有界上行队列、有界命令队列；分别执行丢弃计数、等待/唤醒等策略 |
+| 可靠上报 | MQTT QoS 1、SQLite Store-and-Forward、Broker 断线重连、历史遥测补发 |
+| 边缘分析 | 本地阈值/持续时间/冷却时间规则，滑动窗口异常评分，RK3576 的 RKNN 时序模型推理 |
+| 运维可靠性 | systemd 服务、自检与硬件 Watchdog、进程及队列状态查询 |
 
-南向数据统一转换为 `TelemetryMessage`，下行控制统一转换为 `DeviceCommand`，上层业务不直接依赖具体协议实现。
+**TCP 下行通知的实际执行顺序**：`TcpConnector::sendCommand()` 在持有 `pending_commands_mutex_` 时，先 `write(wake_fd_)`，成功建立唤醒条件后将封装好的帧放入 `pending_commands_`，再释放锁；I/O 线程收到 `wake_fd_` 的 **`EPOLLIN`**，读取通知并提取命令，随后给目标客户端 Socket 开启 **`EPOLLOUT`**，按可写状态发送。`eventfd` 不直接传输命令，也不等同于客户端 Socket 的可写事件。
 
-### 3. Bounded Queue & Overload Protection
+## 3. RK3576 NPU 边缘异常检测
 
-协议 I/O 与业务 Worker 通过线程安全有界队列解耦：
+基于工业时序数据构建多变量异常检测推理链路，包含：
 
-- `TelemetryQueue`: capacity = 1000
-- `CommandQueue`: capacity = 100
-- `mutex + condition_variable`
-- 满载时拒绝新消息，避免内存无界增长
-- TelemetryQueue 提供显式 `Dropped Counter`
+1. 使用 PyTorch 模型并导出 ONNX，执行 ONNX → RKNN 转换（见 `ml/convert_onnx_to_rknn.py`）。
+2. 依据 `preprocess.json` 提取 8 维特征，执行与训练阶段一致的归一化。
+3. 维护 **64 × 8** 滑动时间窗口，在满足推理条件时调用 RKNN Runtime。
+4. 将推理结果转换为异常概率及判断结果，作为遥测指标进入现有处理链路。
+5. 使用 `tools/rknn_model_smoke_test.cpp` 进行模型加载、数值对照和推理性能检查。
 
-过载验证：容量 1000、无消费者持续 push 2000 条消息。
+板端配置：`config/gateway.rk3576.yaml`。示例模型和预处理资源位于 `models/ai/skab_valve_v1/`；其中 SKAB 演示设备与 Modbus 模拟 PLC 分开配置。
 
-```text
-accepted = 1000
-rejected = 1000
-dropped  = 1000
-```
+## 4. 测试记录
 
-### 4. MQTT Store-and-Forward
+以下为项目实机及故障测试的阶段性记录；具体性能取决于测试配置、设备负载、Broker 环境和统计口径，不能直接外推到任意工业现场。
 
-Broker 不可用时，Gateway 不停止南向设备采集：
+| 场景 | 配置 / 结果 |
+| --- | --- |
+| TCP 并发 | RK3576；100 个 TCP 客户端、约 500 msg/s，5000 条遥测完整送达 |
+| 长稳运行 | RK3576；50 个客户端、200 msg/s，运行 **26 h**，累计约 **1872 万** 条遥测；记录 Dropped=0、进程无重启 |
+| MQTT 离线恢复 | Broker 故障期间缓存，恢复后 **1125 条** 离线遥测无缺失恢复 |
+| 进程故障恢复 | systemd 自动拉起服务；一次测试记录约 **3.45 s** 恢复 MQTT 连接 |
+| NPU 数值一致性 | 509 个验证窗口的分类结果与 PyTorch 一致 |
+| NPU 效果与性能 | F1 **0.8441**；64 × 8 输入窗口，板端平均推理约 **9.86 ms**、约 **101 次/s** |
+| i.MX6ULL 看门狗 | 使用 `SIGSTOP` 模拟用户态进程假死，硬件 Watchdog 可触发板级复位并随系统启动恢复服务 |
 
-1. MQTT publish 失败或连接断开；
-2. 遥测数据写入 SQLite `offline_messages`；
-3. Telemetry Worker 继续消费设备数据；
-4. MQTT 连接周期性重试；
-5. Broker 恢复后自动批量补发历史消息；
-6. 单条消息 publish 成功后再删除对应 SQLite 记录。
+> 上述 RK3576 数值来自本项目阶段性测试记录；仓库快照中的源码和配置能够说明实现方式，但仅凭源码无法独立复核全部实测数字。正式复现时应配套保存压测脚本、原始日志、时间区间及结果统计方法。**MQTT QoS 1 提供至少一次交付语义，并不保证消息绝对不重复。**
 
-当前离线补发批次大小为 100 条，MQTT 断线重连节流间隔为 5 s。
-
-### 5. Bidirectional Control
-
-MQTT Callback 仅负责接收、校验和入队，不直接执行可能阻塞的设备 I/O。
-
-示例：通过 MQTT 修改 Modbus PLC 的转速寄存器。
-
-```json
-{
-  "request_id": "cmd-001",
-  "device_id": "modbus-plc-01",
-  "action": "set_speed",
-  "parameters": {
-    "value": 1200
-  }
-}
-```
-
-执行链路：
+## 5. 源码目录
 
 ```text
-MQTT
-  -> CommandConverter
-  -> CommandQueue
-  -> Command Worker
-  -> CommandRouter
-  -> ModbusConnector
-  -> Holding Register 2
+industrial-edge-gateway/
+├── src/
+│   ├── connectors/      # TCP / SocketCAN / Modbus TCP / Mock
+│   ├── core/            # GatewayContext、CommandRouter、各类队列
+│   ├── model/           # TelemetryMessage、DeviceCommand、ProcessedTelemetry
+│   ├── converters/      # 遥测与控制 JSON 转换
+│   ├── rules/           # 本地规则引擎
+│   ├── anomaly/         # 滑动窗口异常检测
+│   ├── ai/              # RKNN Runtime 与时序模型集成
+│   ├── mqtt/            # MQTT Publisher / Subscriber
+│   ├── storage/         # SQLite OfflineStore
+│   ├── control/         # Unix Domain Socket 控制接口
+│   ├── health/          # Hardware Watchdog
+│   └── common/          # 配置、日志、进程指标
+├── tools/               # gatewayctl / TCP / Modbus 模拟器 / RKNN 测试
+├── tests/               # 基础测试
+├── config/              # Ubuntu / i.MX6ULL / RK3576 配置
+├── ml/                  # RKNN 模型转换、参考输出与数据注入脚本
+├── models/ai/           # 模型及预处理资源
+├── cmake/               # ARM / Buildroot 工具链配置
+├── deploy/              # systemd、udev
+├── docker/mosquitto/    # Broker 开发配置
+└── CMakeLists.txt
 ```
 
-写入后由下一轮 Modbus 周期采集再次读回，实现控制与状态回读闭环。
+## 6. Ubuntu 本地构建与运行
 
-### 6. Hardware Watchdog
-
-i.MX6ULL 板端通过 `/dev/watchdog0` 使用硬件 Watchdog：
-
-```yaml
-watchdog:
-  enabled: true
-  device: /dev/watchdog0
-  timeout_sec: 15
-  feed_interval_sec: 5
-  health_timeout_sec: 60
-```
-
-Watchdog 不只检查 `gatewayd` 进程是否存在，而是根据核心 Worker 是否能够继续推进决定是否喂狗。
-
-实际使用 `SIGSTOP` 暂停正式 `gatewayd`，模拟“进程仍存在但完全假死”的场景：约 15 s 后硬件复位，Linux 重启后服务自动恢复。
-
-### 7. Runtime Observability
-
-`gatewayd` 通过 Unix Domain Socket 提供本地控制面：
-
-```text
-/tmp/gateway.sock
-```
-
-配套 `gatewayctl`：
-
-```bash
-./build/gatewayctl status
-./build/gatewayctl devices
-./build/gatewayctl health
-```
-
-可查看：MQTT 状态、在线设备、Queue 深度、Dropped、RSS、Open FD、线程数、Uptime 等运行指标。
-
----
-
-## Reliability & Stress Tests
-
-| Test | Scenario | Result |
-| --- | --- | --- |
-| TCP churn | 连续 200 次 connect / disconnect | `gatewayd` 持续运行，Open FD **13 → 13**，无残留 ESTABLISHED 连接 |
-| TCP recovery | 客户端异常退出后重新连接 | Gateway 不退出，设备路由与下行链路恢复 |
-| CAN stress | `vcan`, ~100 fps × 1000 frames | Open FD **13 → 13**，RSS ~**10772 → 10784 KB** |
-| CAN high load | `vcan`, ~1000 fps × 10000 frames | `gatewayd` 存活，Open FD 保持 **13** |
-| CAN burst investigation | `cangen -g 0 -n 20000` | 定位部分帧在进入应用 Queue 前已于内核 / SocketCAN 接收路径丢弃 |
-| Queue overload | capacity 1000, push 2000 | **1000 accepted / 1000 rejected / 1000 dropped** |
-| MQTT offline | 主动停止 Mosquitto | Gateway 继续运行，遥测持久化进入 SQLite |
-| MQTT recovery | Broker 重启，不重启 `gatewayd` | 自动重连与补发，最终 `offline_messages = 0` |
-| Modbus polling | i.MX6ULL → Ubuntu 模拟 PLC，1 s polling | 温度、湿度、转速正常读取并 MQTT 上报 |
-| Modbus downlink | MQTT `set_speed` → HR2 | 1500 → 1200 / 1350，并在下一轮采集中读回 |
-| Modbus recovery | PLC 主动退出再恢复 | Gateway 不退出，Connector 自动重连 |
-| Watchdog stall | 对正式 `gatewayd` 执行 `SIGSTOP` | 约 **15 s** 后整板硬件复位，系统启动后服务自动恢复 |
-| Soak test | i.MX6ULL 正式环境持续运行 | **24 h passed** |
-
-> CAN 压力数据基于 Linux `vcan` 软件接口，用于验证应用侧 SocketCAN 接收链路和资源稳定性，不等同于真实物理 CAN 总线的极限吞吐能力。
-
----
-
-## Platform & Dependencies
-
-### Target
-
-- NXP i.MX6ULL / ARM Cortex-A7
-- Buildroot Linux
-- SocketCAN
-- `/dev/watchdog0`
-
-### Development Host
-
-- Ubuntu Linux
-- GCC / G++
-- CMake >= 3.16
-- Mosquitto
-- SQLite3
-- libmodbus
-
-### C++ Libraries
-
-- yaml-cpp
-- spdlog
-- nlohmann/json
-- Eclipse Paho MQTT C / C++
-- SQLite3
-- libmodbus
-
-Ubuntu / Debian 开发环境可安装：
+### 安装依赖
 
 ```bash
 sudo apt update
@@ -307,223 +152,97 @@ sudo apt install -y \
   libyaml-cpp-dev libspdlog-dev nlohmann-json3-dev \
   libsqlite3-dev libmodbus-dev \
   libpaho-mqtt-dev libpaho-mqttpp-dev \
-  mosquitto mosquitto-clients can-utils
+  mosquitto mosquitto-clients can-utils sqlite3
 ```
 
----
-
-## Build
+### 编译
 
 ```bash
 git clone https://github.com/YIMOUSHUI/industrial-edge-gateway.git
 cd industrial-edge-gateway
-
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 ```
 
-主要可执行文件：
+主要程序：`build/gatewayd`、`build/gatewayctl`、`build/tcp_device_simulator`、`build/modbus_device_simulator`。若本机安装了匹配的 RKNN Runtime 和头文件，还会生成 `rknn_model_smoke_test`；普通 Ubuntu 环境允许不启用 RKNN 后端。
 
-```text
-build/gatewayd
-build/gatewayctl
-build/tcp_device_simulator
-build/modbus_device_simulator
-```
+### 启动演示环境
 
----
-
-## Quick Start on Ubuntu
-
-### 1. Start MQTT Broker
-
-```bash
-mosquitto -c docker/mosquitto/mosquitto.conf -v
-```
-
-### 2. Create `vcan0`
+先在仓库根目录初始化软件 CAN 接口：
 
 ```bash
 sudo modprobe vcan
 sudo ip link add dev vcan0 type vcan 2>/dev/null || true
 sudo ip link set dev vcan0 up
-ip -details link show vcan0
 ```
 
-### 3. Start Modbus PLC Simulator
+然后在不同终端分别启动：
 
 ```bash
+# 终端 A：Broker（从仓库根目录执行）
+mosquitto -c docker/mosquitto/mosquitto.conf -v
+
+# 终端 B：Modbus 模拟 PLC
 ./build/modbus_device_simulator
-```
 
-默认监听 `0.0.0.0:1502`，初始 Holding Registers：
+# 终端 C：网关（默认使用 config/gateway.yaml）
+./build/gatewayd config/gateway.yaml
 
-```text
-HR0 = 250   -> 25.0 °C
-HR1 = 600   -> 60.0 %
-HR2 = 1500  -> 1500 rpm
-```
-
-### 4. Start Gateway
-
-```bash
-./build/gatewayd
-```
-
-开发配置：`config/gateway.yaml`
-
-### 5. Inspect Runtime Status
-
-```bash
+# 终端 D：本地管理工具
 ./build/gatewayctl status
 ./build/gatewayctl devices
 ./build/gatewayctl health
 ```
 
-### 6. Subscribe Telemetry
+注意避免同时启动系统自带 Mosquitto 服务与上述 Broker 而占用同一个 `1883` 端口。
+
+订阅遥测：
 
 ```bash
-mosquitto_sub \
-  -h 127.0.0.1 \
-  -p 1883 \
-  -t 'gateway/gateway-01/telemetry' \
-  -v
+mosquitto_sub -h 127.0.0.1 -p 1883 \
+  -t 'gateway/gateway-01/telemetry' -v
 ```
 
-### 7. Send Modbus Command
+发送 Modbus 控制命令：
 
 ```bash
-mosquitto_pub \
-  -h 127.0.0.1 \
-  -p 1883 \
+mosquitto_pub -h 127.0.0.1 -p 1883 \
   -t 'gateway/gateway-01/command' \
   -m '{"request_id":"cmd-001","device_id":"modbus-plc-01","action":"set_speed","parameters":{"value":1200}}'
 ```
 
-下一轮 Modbus 遥测中应读取到 `speed = 1200 rpm`。
+默认 Modbus 模拟器在本地监听 `1502` 端口；命令写入完成后可通过下一轮轮询遥测检查转速寄存器回读情况。
 
----
+## 7. 嵌入式板端部署
 
-## MQTT Offline Recovery Demo
+### i.MX6ULL / Buildroot
 
-Gateway 运行过程中停止 Broker：
-
-```bash
-sudo systemctl stop mosquitto
-```
-
-查询离线消息：
+项目提供 `cmake/arm-buildroot-toolchain.cmake`。交叉编译前需要根据自己的 Buildroot SDK / sysroot 调整该文件中的工具链路径，并在目标根文件系统准备依赖库。
 
 ```bash
-sqlite3 gateway.db 'SELECT COUNT(*) FROM offline_messages;'
-```
-
-恢复 Broker：
-
-```bash
-sudo systemctl start mosquitto
-```
-
-Gateway 无需重启，会自动重新连接并补发历史数据。补发完成后：
-
-```bash
-sqlite3 gateway.db 'SELECT COUNT(*) FROM offline_messages;'
-```
-
-预期：
-
-```text
-0
-```
-
----
-
-## ARM / Buildroot Cross Compilation
-
-项目提供：
-
-```text
-cmake/arm-buildroot-toolchain.cmake
-```
-
-首次使用前设置 toolchain 中的 `BUILDROOT_DIR`，并确保 Buildroot staging 中已包含项目依赖库。
-
-```bash
-cmake \
-  -S . \
-  -B build-arm \
-  -DCMAKE_BUILD_TYPE=Release \
+cmake -S . -B build-arm -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=cmake/arm-buildroot-toolchain.cmake
-
 cmake --build build-arm -j"$(nproc)"
 ```
 
-板端配置参考：
+部署时使用 `config/gateway.imx6ull.yaml`，并根据板端的 `can0`、Broker 地址和设备连接情况调整配置。
 
-```text
-config/gateway.imx6ull.yaml
+### RK3576 / RKNN
+
+仓库包含 `config/gateway.rk3576.yaml`，用于 RK3576 场景；在已正确安装 RKNN Runtime、模型和全部项目依赖的 RK3576 Linux 环境中构建并运行：
+
+```bash
+./build/gatewayd config/gateway.rk3576.yaml
 ```
 
-真实 CAN 接口：
+这里的 `build/gatewayd` 指 **在 RK3576 平台编译得到的程序**，不能直接使用 Ubuntu x86_64 或 i.MX6ULL ARM32 构建产物。当前 CMake 按可用的 RKNN 头文件和 `librknnrt` 决定是否启用 RKNN 后端；该配置还依赖本机的 `can0`、Mosquitto 和 Modbus 测试端，运行前须核对这些服务及 `/dev/watchdog0` 的实际状态。
 
-```yaml
-- name: can-bus
-  type: can
-  enabled: true
-  interface: can0
-```
+## 8. 工程说明
 
-硬件 Watchdog：
+- **协议与模型解耦**：MQTT 上报和规则处理面向统一遥测模型，不直接依赖原始 TCP 字节、CAN ID 或 Modbus 寄存器布局。
+- **设备级时序**：设备亲和性便于维护规则和 NPU 滑动窗口状态，不代表整个系统具有严格的全局消息顺序。
+- **错误与过载可观测**：通过 `gatewayctl`、队列长度、Dropped、线程数、RSS、Open FD 等指标观察运行状态。
+- **离线容错边界**：SQLite 的补发策略提升 Broker 故障期间的数据保留能力；极端情况下仍需结合数据库持久化策略、断电恢复和云侧幂等去重评估交付保证。
+- **真实 CAN 与 vcan**：软件虚拟 CAN 验证不等同于物理 CAN 总线极限吞吐测试。
 
-```yaml
-watchdog:
-  enabled: true
-  device: /dev/watchdog0
-  timeout_sec: 15
-  feed_interval_sec: 5
-  health_timeout_sec: 60
-```
-
----
-
-## Project Structure
-
-```text
-industrial-edge-gateway/
-├── src/
-│   ├── common/          # Config / logger / process metrics
-│   ├── connectors/      # TCP / SocketCAN / Modbus / Mock
-│   ├── control/         # Unix Domain Socket control plane
-│   ├── converters/      # Telemetry / Command conversion
-│   ├── core/            # GatewayContext / Queue / CommandRouter
-│   ├── health/          # Hardware Watchdog
-│   ├── model/           # Unified data model
-│   ├── mqtt/            # MQTT publisher / subscriber
-│   └── storage/         # SQLite OfflineStore
-├── tools/
-│   ├── gatewayctl.cpp
-│   ├── tcp_device_simulator.cpp
-│   └── modbus_device_simulator.cpp
-├── tests/               # Smoke tests
-├── config/              # Ubuntu / i.MX6ULL configuration
-├── cmake/               # Buildroot ARM toolchain
-├── docker/mosquitto/    # Development broker config
-└── CMakeLists.txt
-```
-
----
-
-## Design Notes
-
-- **Bounded queue instead of unlimited buffering**: overload is exposed explicitly through Dropped Counter rather than being converted into uncontrolled memory growth.
-- **MQTT failure is treated as degraded mode, not whole-system failure**: southbound acquisition continues and telemetry is persisted locally.
-- **Socket ownership stays inside the TCP I/O thread**: business threads deliver commands through queue + `eventfd`, reducing shared connection-state access.
-- **Watchdog focuses on progress, not process existence**: external dependency failures such as MQTT disconnect do not automatically trigger a board reset; core worker stall does.
-
----
-
-## Notes
-
-- `1000 fps / 10000 frames` CAN stress testing uses Linux `vcan`; it validates the software receive path and process stability, not physical CAN bus peak throughput.
-- This repository is an embedded Linux systems programming / industrial communication project and does not claim commercial product certification.
-
+本仓库用于展示嵌入式 Linux、网络编程、工业通信、可靠消息处理和 RK3576 NPU 推理的系统开发实践。

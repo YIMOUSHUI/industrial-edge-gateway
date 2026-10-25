@@ -129,6 +129,33 @@ if(RKNN_API_INCLUDE_DIR AND RKNNRT_LIBRARY)
         ${RKNNRT_LIBRARY}
     )
 
+    # --------------------------------------------------------
+    # RKNN独立模型验证与性能测试工具
+    #
+    # 仅在RKNN Runtime可用的平台构建。
+    #
+    # 用途：
+    # 1. 模型加载验证
+    # 2. 数值一致性验证
+    # 3. NPU推理延迟 P50/P95/P99 测试
+    # --------------------------------------------------------
+    add_executable(
+        rknn_model_smoke_test
+        tools/rknn_model_smoke_test.cpp
+    )
+
+    target_include_directories(
+        rknn_model_smoke_test
+        PRIVATE
+        ${RKNN_API_INCLUDE_DIR}
+    )
+
+    target_link_libraries(
+        rknn_model_smoke_test
+        PRIVATE
+        ${RKNNRT_LIBRARY}
+    )
+
 else()
     message(
         STATUS

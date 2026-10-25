@@ -30,3 +30,35 @@ Makefile
 .vscode/
 .idea/
 *.code-workspace
+
+# Third-party repositories and experiments
+/third_party/
+
+# Python temporary files
+__pycache__/
+*.py[cod]
+# Python virtual environments
+/.venv/
+/.venv-rknn/
+
+# Third-party ML project and downloaded SDK
+/third_party/
+/ml/rknn_sdk/
+
+# Intermediate ONNX debugging files
+/check*_*.onnx
+
+# Build directories
+/build/
+/build-arm/
+
+# Runtime databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Python cache
+__pycache__/
+*.pyc
+
