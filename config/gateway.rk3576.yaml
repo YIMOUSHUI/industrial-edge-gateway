@@ -5,7 +5,7 @@ runtime:
   worker_threads: 4
 
 logging:
-  level: debug
+  level: warn
 
 # 本地边缘规则。
 #
@@ -59,6 +59,19 @@ anomaly_detection:
 
       # 采样间隔超过10秒则重置窗口
       max_gap_ms: 10000
+
+# M4：RK3576 NPU多变量时序AI异常检测
+#
+# 当前SKAB模型只用于独立的AI演示设备，
+# 不直接绑定现有modbus-plc-01。
+ai_inference:
+  enabled: true
+
+  device_id: skab-valve-demo
+
+  model_path: models/ai/skab_valve_v1/skab_hybrid.rknn
+
+  preprocess_path: models/ai/skab_valve_v1/preprocess.json
 
 connectors:
   # 第一阶段保留Mock，用于确认基础上行链。

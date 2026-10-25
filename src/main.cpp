@@ -22,7 +22,7 @@ int main(int argc, char* argv[])
      * 默认仍然使用PC开发环境配置。
      *
      * 如果命令行提供第一个参数，
-     * 则使用用户指定的配置文件。
+     * 则使用用户指定的配置文件。2.
      *
      * 示例：
      *   ./gatewayd config/gateway.rk3576.yaml

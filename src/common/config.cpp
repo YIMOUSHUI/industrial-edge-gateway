@@ -480,6 +480,88 @@ bool Config::load(const std::string& path)
             }
         }
 
+        /*
+        * M4：RK3576 NPU多变量时序AI推理配置。
+        *
+        * ai_inference不存在：
+        *   默认关闭，保持Ubuntu和旧配置兼容。
+        */
+        data_.ai_inference = AiInferenceConfig{};
+        if (root["ai_inference"])
+        {
+            const YAML::Node ai_node = root["ai_inference"];
+
+            if (!ai_node.IsMap())
+            {
+                std::cerr
+                    << "[Config] ai_inference must be a map"
+                    << std::endl;
+
+                return false;
+            }
+
+            if (ai_node["enabled"])
+            {
+                data_.ai_inference.enabled =
+                    ai_node["enabled"].as<bool>();
+            }
+
+            if (ai_node["device_id"])
+            {
+                data_.ai_inference.device_id =
+                    ai_node["device_id"].as<std::string>();
+            }
+
+            if (ai_node["model_path"])
+            {
+                data_.ai_inference.model_path =
+                    ai_node["model_path"].as<std::string>();
+            }
+
+            if (ai_node["preprocess_path"])
+            {
+                data_.ai_inference.preprocess_path =
+                    ai_node["preprocess_path"].as<std::string>();
+            }
+
+            /*
+            * AI功能启用以后，
+            * 三个核心字段必须全部明确配置。
+            */
+            if (data_.ai_inference.enabled)
+            {
+                if (data_.ai_inference.device_id.empty())
+                {
+                    std::cerr
+                        << "[Config] ai_inference.device_id "
+                        << "must not be empty"
+                        << std::endl;
+
+                    return false;
+                }
+
+                if (data_.ai_inference.model_path.empty())
+                {
+                    std::cerr
+                        << "[Config] ai_inference.model_path "
+                        << "must not be empty"
+                        << std::endl;
+
+                    return false;
+                }
+
+                if (data_.ai_inference.preprocess_path.empty())
+                {
+                    std::cerr
+                        << "[Config] ai_inference.preprocess_path "
+                        << "must not be empty"
+                        << std::endl;
+
+                    return false;
+                }
+            }
+        }
+
         if (root["mqtt"])
         {
             const YAML::Node mqtt_node = root["mqtt"];
