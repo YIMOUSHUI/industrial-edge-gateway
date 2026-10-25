@@ -1,0 +1,12 @@
+{
+  "shape": [
+    1,
+    64,
+    8
+  ],
+  "dtype": "float32",
+  "label": 0,
+  "checkpoint_epoch": 17,
+  "pytorch_logit": -1.8024139404296875,
+  "pytorch_probability": 0.1415574699640274
+}
